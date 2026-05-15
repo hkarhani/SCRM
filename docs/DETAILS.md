@@ -67,19 +67,19 @@ Workspace bundle exports intentionally exclude passwords.
 The app can generate a standalone host IP collector script from:
 
 ```text
-/api/download/offline-host-collector.py
+/api/download/scrm-offline-host-ip-collector.py
 ```
 
 Example without TLS verification:
 
 ```bash
-python3 scrm_collect_host_ips.py --url https://platform.example.local --username <user> --output hosts.json
+python3 scrm_offline_host_ip_collector.py --url https://platform.example.local --username <user> --output hosts.json
 ```
 
 Example with TLS verification:
 
 ```bash
-python3 scrm_collect_host_ips.py --url https://platform.example.local --username <user> --verify-tls --output hosts.json
+python3 scrm_offline_host_ip_collector.py --url https://platform.example.local --username <user> --verify-tls --output hosts.json
 ```
 
 The script prompts for the password securely at runtime.

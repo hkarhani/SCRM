@@ -502,12 +502,13 @@ async def apply_ranges(payload: ApplyRangesPayload) -> dict[str, Any]:
     }
 
 
+@app.get("/api/download/scrm-offline-host-ip-collector.py")
 @app.get("/api/download/offline-host-collector.py")
 async def download_offline_host_collector() -> StreamingResponse:
     return StreamingResponse(
         iter([offline_host_collector_script()]),
         media_type="text/x-python",
-        headers={"Content-Disposition": 'attachment; filename="scrm_collect_host_ips.py"'},
+        headers={"Content-Disposition": 'attachment; filename="scrm_offline_host_ip_collector.py"'},
     )
 
 

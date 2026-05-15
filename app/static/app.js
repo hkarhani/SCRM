@@ -283,7 +283,7 @@ function uploadCard(kind, title, meta = {}, accept = ".xml,text/xml", required =
       </div>
       <div class="muted">${ready ? `${formatBytes(meta.size)} uploaded` : kind === "hosts" ? "Import collector output or a CSV/list of host IPs" : "Upload an XML export"}</div>
       <input type="file" data-upload="${kind}" accept="${escapeAttr(accept)}" />
-      ${kind === "hosts" ? `<a class="button secondary small" href="/api/download/offline-host-collector.py">Download collector script</a>` : ""}
+      ${kind === "hosts" ? `<a class="button secondary small" href="/api/download/scrm-offline-host-ip-collector.py">Download collector script</a>` : ""}
     </div>
   `;
 }
