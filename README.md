@@ -73,7 +73,14 @@ The container runs as a non-root user.
 
 ## Docker Hub Publishing
 
-To publish an image with SBOM and provenance attestations, use Docker Buildx:
+The GitHub workflow publishes `hkarhani/scrm:latest` with SBOM and provenance attestations when these repository secrets exist:
+
+- `DOCKERHUB_USERNAME`
+- `DOCKERHUB_TOKEN`
+
+Use a Docker Hub access token with write access. If either secret is missing, the workflow fails intentionally so Docker Hub is not left with an unattested `latest` image.
+
+To publish manually with the same attestations, use Docker Buildx:
 
 ```bash
 docker login
