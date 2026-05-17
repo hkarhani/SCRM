@@ -3,6 +3,7 @@ set -eu
 
 IMAGE="${IMAGE_NAME:-${DOCKER_REPO:-}}"
 DOCKERFILE="${DOCKERFILE_PATH:-Dockerfile}"
+BUILDER="${BUILDX_BUILDER:-scrm-attestation-builder}"
 
 if [ -z "$IMAGE" ]; then
   echo "Docker Hub did not provide IMAGE_NAME or DOCKER_REPO." >&2
@@ -11,7 +12,16 @@ fi
 
 echo "Building and publishing ${IMAGE} with SBOM and provenance attestations."
 
+if docker buildx inspect "$BUILDER" >/dev/null 2>&1; then
+  docker buildx use "$BUILDER"
+else
+  docker buildx create --name "$BUILDER" --driver docker-container --use
+fi
+
+docker buildx inspect --bootstrap
+
 docker buildx build \
+  --builder "$BUILDER" \
   --file "$DOCKERFILE" \
   --tag "$IMAGE" \
   --sbom=true \

@@ -75,7 +75,7 @@ The container runs as a non-root user.
 
 Docker Hub automated builds are supported through the repository `hooks/` scripts.
 
-- `hooks/build` runs `docker buildx build` with `--sbom=true` and `--provenance=mode=max`, then pushes the attested image.
+- `hooks/build` bootstraps a Buildx `docker-container` builder, then runs `docker buildx build` with `--sbom=true` and `--provenance=mode=max`, then pushes the attested image.
 - `hooks/push` skips the default push because the attested image was already pushed during the build hook.
 
 Keep Docker Hub automated builds enabled, but make sure this repository is configured as the build source so Docker Hub uses the checked-in hooks.
