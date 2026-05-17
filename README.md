@@ -73,14 +73,14 @@ The container runs as a non-root user.
 
 ## Docker Hub Publishing
 
-The GitHub workflow publishes `hkarhani/scrm:latest` with SBOM and provenance attestations when these repository secrets exist:
+Docker Hub automated builds are supported through the repository `hooks/` scripts.
 
-- `DOCKERHUB_USERNAME`
-- `DOCKERHUB_TOKEN`
+- `hooks/build` runs `docker buildx build` with `--sbom=true` and `--provenance=mode=max`, then pushes the attested image.
+- `hooks/push` skips the default push because the attested image was already pushed during the build hook.
 
-Use a Docker Hub access token with write access. If either secret is missing, the workflow fails intentionally so Docker Hub is not left with an unattested `latest` image.
+Keep Docker Hub automated builds enabled, but make sure this repository is configured as the build source so Docker Hub uses the checked-in hooks.
 
-To publish manually with the same attestations, use Docker Buildx:
+To publish manually with equivalent attestations, use Docker Buildx:
 
 ```bash
 docker login
@@ -92,4 +92,4 @@ docker buildx build \
   --push .
 ```
 
-If Docker Hub automated builds are also enabled for the same repository, make sure they do not overwrite an attested `latest` image unless the automated build is configured to attach equivalent attestations.
+The GitHub workflow validates the image build only. Docker Hub automated builds own the published `latest` image.

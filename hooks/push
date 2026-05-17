@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+
+echo "Skipping default push: hooks/build already pushed the attested image."

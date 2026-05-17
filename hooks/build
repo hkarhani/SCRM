@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+
+IMAGE="${IMAGE_NAME:-${DOCKER_REPO:-}}"
+DOCKERFILE="${DOCKERFILE_PATH:-Dockerfile}"
+
+if [ -z "$IMAGE" ]; then
+  echo "Docker Hub did not provide IMAGE_NAME or DOCKER_REPO." >&2
+  exit 1
+fi
+
+echo "Building and publishing ${IMAGE} with SBOM and provenance attestations."
+
+docker buildx build \
+  --file "$DOCKERFILE" \
+  --tag "$IMAGE" \
+  --sbom=true \
+  --provenance=mode=max \
+  --push \
+  .
