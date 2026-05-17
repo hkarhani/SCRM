@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12-alpine
 
 ARG BUILD_DATE=""
 ARG VCS_REF=""
@@ -20,10 +20,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
-RUN apt-get update \
-    && apt-get upgrade -y --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/* \
-    && python -m pip install --no-cache-dir --upgrade pip==26.1.1 \
+RUN python -m pip install --no-cache-dir --upgrade pip==26.1.1 \
     && pip install --no-cache-dir -r /app/requirements.txt
 
 COPY app /app/app
