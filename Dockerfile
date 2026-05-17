@@ -20,16 +20,21 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
-RUN python -m pip install --no-cache-dir --upgrade pip==26.1.1 \
-    && pip install --no-cache-dir -r /app/requirements.txt
+RUN python -m pip install --no-cache-dir --root-user-action=ignore --upgrade pip==26.1.1 \
+    && pip install --no-cache-dir --root-user-action=ignore -r /app/requirements.txt
 
 COPY app /app/app
 
-RUN mkdir -p /app/SCR/uploads /app/SCR/snapshots /app/SCR/Documents
+RUN addgroup -S scrm \
+    && adduser -S -D -H -u 10001 -G scrm scrm \
+    && mkdir -p /app/SCR/uploads /app/SCR/snapshots /app/SCR/Documents \
+    && chown -R scrm:scrm /app
 
 VOLUME ["/app/SCR"]
 
 EXPOSE 8080
+
+USER scrm
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD python -c "import json, urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=3)); raise SystemExit(0 if data.get('ok') else 1)"

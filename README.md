@@ -68,3 +68,21 @@ When using a published image, keep the same localhost-only binding:
 ```bash
 docker run --rm -p 127.0.0.1:8088:8080 -v "$PWD/SCR:/app/SCR" hkarhani/scrm:latest
 ```
+
+The container runs as a non-root user.
+
+## Docker Hub Publishing
+
+To publish an image with SBOM and provenance attestations, use Docker Buildx:
+
+```bash
+docker login
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  --sbom=true \
+  --provenance=mode=max \
+  --tag hkarhani/scrm:latest \
+  --push .
+```
+
+If Docker Hub automated builds are also enabled for the same repository, make sure they do not overwrite an attested `latest` image unless the automated build is configured to attach equivalent attestations.
