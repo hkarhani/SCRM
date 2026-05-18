@@ -1267,7 +1267,8 @@ input[type="file"]::file-selector-button {
 }
 
 .segment-lens-grid,
-.ip-lens-grid {
+.ip-lens-grid,
+.policy-lens-grid {
   grid-template-columns: minmax(280px, 0.28fr) minmax(0, 1fr);
 }
 
@@ -1303,6 +1304,10 @@ input[type="file"]::file-selector-button {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 10px;
+}
+
+.segment-visual-grid.compact {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
 .range-segment-card {
@@ -1505,9 +1510,17 @@ input[type="file"]::file-selector-button {
   padding: 12px;
 }
 
+.range-row-card.selected,
+.range-segment-card.selected {
+  border-color: #93c5fd;
+  background: #eff6ff;
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.18);
+}
+
 .range-row-stage {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 6px;
 }
 

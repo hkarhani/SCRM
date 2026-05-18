@@ -1279,15 +1279,25 @@ def build_policy_segment_usage(policies: list[dict[str, Any]], xml_segments: lis
                 continue
             path_key = _normalize_path(segment.get("path", ""))
             direct_paths.add(path_key)
-            refs_by_path.setdefault(path_key, []).append({"policy": policy.get("name", ""), "source": ref.get("source", "")})
+            refs_by_path.setdefault(path_key, []).append(
+                {
+                    "policy": policy.get("name", ""),
+                    "source": ref.get("source", ""),
+                    "segment_path": segment.get("path", ""),
+                    "inherited": False,
+                }
+            )
 
     usage: dict[str, dict[str, Any]] = {}
     for segment in live_segments:
         path_key = _normalize_path(segment.get("path", ""))
         direct = path_key in direct_paths
-        inherited_from = next((path for path in direct_paths if path_key.startswith(f"{path}/")), "")
+        inherited_from = max((path for path in direct_paths if path_key.startswith(f"{path}/")), key=len, default="")
         used = direct or bool(inherited_from)
-        references = refs_by_path.get(path_key, [])
+        references = [*refs_by_path.get(path_key, [])]
+        if inherited_from:
+            for reference in refs_by_path.get(inherited_from, []):
+                references.append({**reference, "source": f"{reference.get('source', '')} via parent segment".strip(), "inherited": True})
         usage[segment["key"]] = {
             "used": used,
             "direct_used": direct,

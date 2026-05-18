@@ -18,10 +18,13 @@ const state = {
   selectedRange: localStorage.getItem("selectedRange") || "",
   selectedSegment: localStorage.getItem("selectedSegment") || "",
   selectedIp: localStorage.getItem("selectedIp") || "",
+  selectedPolicyConflictSegment: localStorage.getItem("selectedPolicyConflictSegment") || "",
+  selectedPolicyConflictPolicy: localStorage.getItem("selectedPolicyConflictPolicy") || "",
   visualizationFilters: {
     ranges: localStorage.getItem("vizFilter:ranges") || "",
     segments: localStorage.getItem("vizFilter:segments") || "",
     ips: localStorage.getItem("vizFilter:ips") || "",
+    policies: localStorage.getItem("vizFilter:policies") || "",
   },
   decisions: {},
   recentApplied: [],
@@ -406,6 +409,7 @@ function renderRangeInvestigationPage() {
   const groups = rangeGroups();
   const segments = segmentGroups(groups);
   const ips = ipGroups(groups);
+  const policyGroups = rangePolicyGroups(groups);
   if (!groups.length) {
     return `
       <section class="panel">
@@ -419,11 +423,12 @@ function renderRangeInvestigationPage() {
       </section>
     `;
   }
-  const lens = ["ranges", "segments", "ips"].includes(state.visualizationLens) ? state.visualizationLens : "ranges";
+  const lens = ["ranges", "segments", "ips", "policies"].includes(state.visualizationLens) ? state.visualizationLens : "ranges";
   const lensTabs = [
     ["ranges", "Ranges", groups.length],
     ["segments", "Segments", segments.length],
     ["ips", "Live IPs", ips.length],
+    ["policies", "Conflict Policies", policyGroups.length],
   ];
   return `
     <section class="panel">
@@ -445,7 +450,7 @@ function renderRangeInvestigationPage() {
           )
           .join("")}
       </div>
-      ${lens === "segments" ? renderSegmentLens(segments) : lens === "ips" ? renderIpLens(ips) : renderRangeLens(groups)}
+      ${lens === "segments" ? renderSegmentLens(segments) : lens === "ips" ? renderIpLens(ips) : lens === "policies" ? renderPolicyConflictLens(policyGroups) : renderRangeLens(groups)}
     </section>
   `;
 }
@@ -555,6 +560,39 @@ function renderIpLens(ips) {
   `;
 }
 
+function renderPolicyConflictLens(groups) {
+  if (!groups.length) return `<div class="panel-body"><div class="empty">No policy-backed range conflicts are currently detected.</div></div>`;
+  const filteredGroups = filterPolicyRangeGroups(groups);
+  const selectedRange = filteredGroups.some((group) => group.range === state.selectedRange) ? state.selectedRange : filteredGroups[0]?.range;
+  const selected = filteredGroups.find((group) => group.range === selectedRange) || filteredGroups[0];
+  if (!selected) return renderLensNoMatches("policies", groups.length);
+  const view = policyConflictView(selected, groups);
+  return `
+    <div class="panel-head sub-panel-head">
+      <div>
+        <h2>Conflict Policies</h2>
+        <div class="muted">Select a conflicting range, then click a segment to show policies using it or click a policy to show every segment it uses in this conflict.</div>
+      </div>
+      <button class="button secondary" type="button" data-download-range-png="${escapeAttr(selected.range)}">Download PNG</button>
+    </div>
+    <div class="range-investigation-grid policy-lens-grid">
+      <aside class="range-list">
+        ${renderVisualizationFilter("policies", "Filter conflict policies", "Search by range, segment, policy, or source", policyRangeFilterOptions(groups), filteredGroups.length, groups.length)}
+        <div class="range-list-head">
+          <strong>Ranges with policies</strong>
+          <span class="pill">${formatNumber(filteredGroups.length)} of ${formatNumber(groups.length)}</span>
+        </div>
+        ${filteredGroups.map((group) => policyRangeChoiceButton(group, group.range === selected.range)).join("")}
+      </aside>
+      <div class="range-detail">
+        ${renderPolicyConflictScopeBar(selected, view)}
+        ${renderPolicyConflictVisualization(selected, view)}
+        ${renderPolicyConflictDetails(selected, view)}
+      </div>
+    </div>
+  `;
+}
+
 function renderVisualizationFilter(lens, label, placeholder, options, shownCount, totalCount) {
   const value = state.visualizationFilters?.[lens] || "";
   const listId = `viz-filter-${lens}-options`;
@@ -576,13 +614,15 @@ function renderVisualizationFilter(lens, label, placeholder, options, shownCount
 }
 
 function renderLensNoMatches(lens, totalCount) {
-  const labels = { ranges: "ranges", segments: "segments", ips: "live IPs" };
+  const labels = { ranges: "ranges", segments: "segments", ips: "live IPs", policies: "policy-backed conflicts" };
   const options =
     lens === "segments"
       ? segmentFilterOptions(segmentGroups())
       : lens === "ips"
         ? ipFilterOptions(ipGroups())
-        : rangeFilterOptions(rangeGroups());
+        : lens === "policies"
+          ? policyRangeFilterOptions(rangePolicyGroups())
+          : rangeFilterOptions(rangeGroups());
   return `
     <div class="range-investigation-grid">
       <aside class="range-list">
@@ -613,11 +653,28 @@ function filterIpGroups(ips) {
   return ips.filter((item) => normalizedSearch(ipSearchText(item)).includes(query));
 }
 
+function filterPolicyRangeGroups(groups) {
+  const query = normalizedSearch(state.visualizationFilters.policies);
+  if (!query) return groups;
+  return groups.filter((group) => normalizedSearch(policyRangeSearchText(group)).includes(query));
+}
+
 function rangeSearchText(group = {}) {
   return [
     group.range,
     ...(group.stageLabels || []),
     ...(group.segments || []).flatMap((segment) => [segment.name, segment.path, ...(segment.allRanges || []), ...(segment.ranges || [])]),
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function policyRangeSearchText(group = {}) {
+  return [
+    group.range,
+    ...(group.stageLabels || []),
+    ...(group.segments || []).flatMap((segment) => [segment.name, segment.path]),
+    ...(group.policies || []).flatMap((policy) => [policy.policy, ...(policy.sources || []), ...(policy.segments || []).flatMap((segment) => [segment.name, segment.path])]),
   ]
     .filter(Boolean)
     .join(" ");
@@ -660,6 +717,10 @@ function ipFilterOptions(ips) {
   return uniqueSorted(ips.map((item) => item.ip));
 }
 
+function policyRangeFilterOptions(groups) {
+  return uniqueSorted(groups.flatMap((group) => [group.range, ...(group.policies || []).map((policy) => policy.policy), ...(group.segments || []).map((segment) => segment.name)]));
+}
+
 function rangeChoiceButton(group, active) {
   return `
     <button class="range-choice ${active ? "active" : ""}" type="button" data-range-select="${escapeAttr(group.range)}">
@@ -689,6 +750,17 @@ function ipChoiceButton(item, active) {
       <span>${formatNumber(item.ranges.length)} conflicting range${item.ranges.length === 1 ? "" : "s"}</span>
       <span>${formatNumber(item.segments.length)} segment${item.segments.length === 1 ? "" : "s"}</span>
       <span class="category-strip">${categoryPills(item).join("")}</span>
+    </button>
+  `;
+}
+
+function policyRangeChoiceButton(group, active) {
+  return `
+    <button class="range-choice ${active ? "active" : ""}" type="button" data-range-select="${escapeAttr(group.range)}">
+      <strong>${escapeHtml(group.range)}</strong>
+      <span>${formatNumber(group.segments.length)} segments, ${formatNumber(group.policies.length)} consolidated policies</span>
+      <span class="${group.liveHostCount ? "danger-text" : "muted"}">${formatNumber(group.liveHostCount)} live hosts</span>
+      <span class="category-strip">${categoryPills(group).join("")}</span>
     </button>
   `;
 }
@@ -727,6 +799,448 @@ function renderRangeVisualization(group, actions, liveEdit) {
   `;
 }
 
+function renderPolicyConflictScopeBar(group, view) {
+  if (!view.scopeLabel) return "";
+  return `
+    <div class="stage-summary policy-scope-summary">
+      <strong>${escapeHtml(view.scopeLabel)}</strong>
+      <span>${escapeHtml(view.scopeDescription)}</span>
+      <button class="link-button" type="button" data-clear-policy-conflict-scope>Clear selection</button>
+    </div>
+  `;
+}
+
+function policyConflictView(group, groups = rangePolicyGroups()) {
+  const selectedPolicy = findPolicyAcrossGroups(state.selectedPolicyConflictPolicy, groups);
+  if (selectedPolicy) {
+    return {
+      scopeType: "policy",
+      scopePolicy: selectedPolicy.policy,
+      scopeLabel: `Policy selected: ${selectedPolicy.policy}`,
+      scopeDescription: `${formatNumber(selectedPolicy.segments.length)} segment${selectedPolicy.segments.length === 1 ? "" : "s"} assigned to this policy across ${formatNumber(selectedPolicy.ranges.length)} conflicting range${selectedPolicy.ranges.length === 1 ? "" : "s"}.`,
+      segments: selectedPolicy.segments || [],
+      policies: [selectedPolicy],
+      ranges: selectedPolicy.ranges || [],
+    };
+  }
+
+  const selectedSegmentView = buildPolicySegmentScope(state.selectedPolicyConflictSegment, groups);
+  if (selectedSegmentView) {
+    return selectedSegmentView;
+  }
+
+  return {
+    scopeType: "",
+    scopeLabel: "",
+    scopeDescription: "",
+    segments: group.segments || [],
+    policies: group.policies || [],
+    ranges: [group],
+  };
+}
+
+function findPolicyAcrossGroups(policyName, groups) {
+  if (!policyName) return null;
+  const sources = new Set();
+  const segmentsByKey = new Map();
+  const ranges = [];
+  groups.forEach((group) => {
+    const policy = (group.policies || []).find((item) => item.policy === policyName);
+    if (!policy) return;
+    ranges.push({
+      range: group.range,
+      liveHostCount: group.liveHostCount || 0,
+      ipCount: group.ipCount || 0,
+      stageLabels: group.stageLabels || [],
+      categories: group.categories || [],
+      policy,
+    });
+    (policy.sources || []).forEach((source) => sources.add(source));
+    (policy.segments || []).forEach((segment) => {
+      if (!segmentsByKey.has(segment.key)) {
+        segmentsByKey.set(segment.key, { ...segment, ranges: new Set(), conflictRanges: new Set(), policyReferences: [] });
+      }
+      const stored = segmentsByKey.get(segment.key);
+      (segment.ranges || []).forEach((range) => stored.ranges.add(range));
+      stored.conflictRanges.add(group.range);
+      stored.policyReferences.push(...(segment.policyReferences || []));
+    });
+  });
+  if (!ranges.length) return null;
+  return {
+    policy: policyName,
+    sources: Array.from(sources).sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" })),
+    ranges,
+    segments: Array.from(segmentsByKey.values())
+      .map((segment) => ({
+        ...segment,
+        ranges: Array.from(segment.ranges),
+        conflictRanges: Array.from(segment.conflictRanges),
+      }))
+      .sort((a, b) => Number(b.used) - Number(a.used) || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" })),
+  };
+}
+
+function buildPolicySegmentScope(segmentKey, groups) {
+  if (!segmentKey) return null;
+  let selectedSegment = null;
+  const policiesByName = new Map();
+  const ranges = [];
+
+  groups.forEach((group) => {
+    const segment = (group.segments || []).find((item) => item.key === segmentKey);
+    if (!segment) return;
+    selectedSegment = selectedSegment || segment;
+    const policies = (group.policies || []).filter((policy) => (policy.segments || []).some((item) => item.key === segmentKey));
+    ranges.push({
+      range: group.range,
+      liveHostCount: group.liveHostCount || 0,
+      ipCount: group.ipCount || 0,
+      stageLabels: group.stageLabels || [],
+      categories: group.categories || [],
+      segment,
+      policies,
+    });
+    policies.forEach((policy) => {
+      if (!policiesByName.has(policy.policy)) {
+        policiesByName.set(policy.policy, {
+          policy: policy.policy,
+          sources: new Set(),
+          ranges: [],
+          segmentsByKey: new Map(),
+        });
+      }
+      const stored = policiesByName.get(policy.policy);
+      stored.ranges.push(group.range);
+      (policy.sources || []).forEach((source) => stored.sources.add(source));
+      (policy.segments || []).forEach((item) => {
+        if (!stored.segmentsByKey.has(item.key)) stored.segmentsByKey.set(item.key, item);
+      });
+    });
+  });
+
+  if (!selectedSegment) return null;
+  const policies = Array.from(policiesByName.values())
+    .map((policy) => ({
+      policy: policy.policy,
+      sources: Array.from(policy.sources).sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" })),
+      ranges: uniqueSorted(policy.ranges),
+      segments: Array.from(policy.segmentsByKey.values()).sort((a, b) => Number(b.used) - Number(a.used) || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" })),
+    }))
+    .sort((a, b) => b.ranges.length - a.ranges.length || a.policy.localeCompare(b.policy, undefined, { numeric: true, sensitivity: "base" }));
+
+  return {
+    scopeType: "segment",
+    scopeSegment: selectedSegment.key,
+    scopeLabel: `Segment selected: ${selectedSegment.name || "Unnamed segment"}`,
+    scopeDescription: `${formatNumber(ranges.length)} conflicting range${ranges.length === 1 ? "" : "s"} and ${formatNumber(policies.length)} USED polic${policies.length === 1 ? "y" : "ies"} map to this segment.`,
+    selectedSegment,
+    segments: [selectedSegment],
+    policies,
+    ranges: ranges.sort((a, b) => b.liveHostCount - a.liveHostCount || a.range.localeCompare(b.range)),
+  };
+}
+
+function renderPolicyConflictVisualization(group, view = policyConflictView(group)) {
+  const summary =
+    view.scopeType === "segment"
+      ? `${formatNumber(view.ranges.length)} conflicting range${view.ranges.length === 1 ? "" : "s"} and ${formatNumber(view.policies.length)} consolidated polic${view.policies.length === 1 ? "y" : "ies"} shown for this segment.`
+      : `${formatNumber(view.policies.length)} consolidated polic${view.policies.length === 1 ? "y" : "ies"} shown for this conflict range.`;
+  return `
+    ${view.scopeType === "segment" ? renderPolicySegmentScopeDiagramSvg(group, view) : renderPolicyConflictDiagramSvg(group, view)}
+    <div class="stage-summary">
+      <strong>${summary}</strong>
+      <span>Policies are consolidated across attached segments, so one policy using multiple segments in this overlap appears once with every matching segment listed beneath it.</span>
+    </div>
+  `;
+}
+
+function renderPolicySegmentScopeDiagramSvg(group, view) {
+  const ranges = view.ranges || [];
+  const policies = view.policies || [];
+  const rowHeight = 112;
+  const width = 1760;
+  const height = Math.max(480, 150 + Math.max(ranges.length, policies.length) * rowHeight);
+  const rangeX = 48;
+  const rangeW = 360;
+  const rangeH = 74;
+  const segmentX = 615;
+  const segmentW = 420;
+  const segmentH = 104;
+  const segmentY = Math.round(height / 2 - segmentH / 2);
+  const policyX = 1210;
+  const policyW = 500;
+  const policyH = 74;
+  const rangeStartY = Math.max(110, Math.round((height - ranges.length * rowHeight) / 2));
+  const policyStartY = Math.max(110, Math.round((height - policies.length * rowHeight) / 2));
+  const segment = view.selectedSegment || view.segments?.[0] || {};
+  const segmentColor = segment.used ? "#15803d" : "#b42318";
+  const segmentFill = segment.used ? "#f0fdf4" : "#fff1f2";
+  const segmentLeftX = segmentX;
+  const segmentRightX = segmentX + segmentW;
+  const segmentCenterY = segmentY + segmentH / 2;
+
+  const rangeRows = ranges
+    .map((item, index) => {
+      const y = rangeStartY + index * rowHeight;
+      const centerY = y + rangeH / 2;
+      const active = item.range === group.range;
+      const live = Number(item.liveHostCount || 0) > 0;
+      const color = live ? "#b42318" : "#2563eb";
+      return `
+        <path d="M ${rangeX + rangeW} ${centerY} C ${rangeX + rangeW + 100} ${centerY}, ${segmentLeftX - 100} ${segmentCenterY}, ${segmentLeftX} ${segmentCenterY}" fill="none" stroke="${color}" stroke-width="${active ? 4 : 2.6}" stroke-linecap="round" opacity="${active ? 0.85 : 0.55}" />
+        <g class="diagram-node-clickable" data-policy-scope-range="${escapeAttr(item.range)}">
+          <rect x="${rangeX}" y="${y}" width="${rangeW}" height="${rangeH}" rx="14" fill="${live ? "#fff1f2" : "#eff6ff"}" stroke="${active ? "#2563eb" : color}" stroke-width="${active ? 4 : 2}" />
+          ${svgFitText(item.range, rangeX + 20, y + 28, rangeW - 40, { fontSize: 17, minFontSize: 10, weight: 900, fill: "#111827" })}
+          ${svgFitText(`${formatNumber(item.liveHostCount || 0)} live hosts - ${formatNumber(item.policies?.length || 0)} policies`, rangeX + 20, y + 52, rangeW - 40, { fontSize: 12, minFontSize: 9, weight: 800, fill: live ? "#b42318" : "#64748b" })}
+        </g>
+      `;
+    })
+    .join("");
+
+  const policyRows = policies
+    .map((policy, index) => {
+      const y = policyStartY + index * rowHeight;
+      const centerY = y + policyH / 2;
+      const active = policy.policy === state.selectedPolicyConflictPolicy;
+      return `
+        <path d="M ${segmentRightX} ${segmentCenterY} C ${segmentRightX + 100} ${segmentCenterY}, ${policyX - 100} ${centerY}, ${policyX} ${centerY}" fill="none" stroke="#2563eb" stroke-width="${active ? 4 : 2.5}" stroke-linecap="round" opacity="${active ? 0.85 : 0.58}" />
+        <g class="diagram-node-clickable" data-policy-scope-policy="${escapeAttr(policy.policy || "Unnamed policy")}">
+          <rect x="${policyX}" y="${y}" width="${policyW}" height="${policyH}" rx="14" fill="#eff6ff" stroke="#2563eb" stroke-width="${active ? 4 : 2}" />
+          <rect x="${policyX}" y="${y}" width="9" height="${policyH}" rx="4" fill="#2563eb" />
+          ${svgFitText(policy.policy || "Unnamed policy", policyX + 24, y + 28, policyW - 48, { fontSize: 17, minFontSize: 10, weight: 850, fill: "#111827" })}
+          ${svgFitText(`${formatNumber(policy.ranges?.length || 0)} conflicting ranges, ${formatNumber(policy.sources?.length || 0)} sources`, policyX + 24, y + 52, policyW - 48, { fontSize: 12, minFontSize: 9, weight: 750, fill: "#64748b" })}
+        </g>
+      `;
+    })
+    .join("");
+
+  return `
+    <div class="range-diagram-card">
+      <div class="diagram-head">
+        <div>
+          <span class="eyebrow">Segment policy conflict diagram</span>
+          <strong>${escapeHtml(segment.name || "Unnamed segment")}</strong>
+        </div>
+        <span class="muted">${formatNumber(ranges.length)} ranges, ${formatNumber(policies.length)} policies</span>
+      </div>
+      <div class="range-diagram-scroll">
+        <svg class="range-diagram-svg policy-diagram-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Segment conflict policy diagram">
+          <rect width="${width}" height="${height}" fill="#ffffff" />
+          <text x="${rangeX}" y="42" font-size="18" font-weight="800" fill="#64748b">CONFLICTING RANGES</text>
+          <text x="${segmentX}" y="42" font-size="18" font-weight="800" fill="#64748b">SELECTED SEGMENT</text>
+          <text x="${policyX}" y="42" font-size="18" font-weight="800" fill="#64748b">POLICIES USING SEGMENT</text>
+          ${rangeRows}
+          <g class="diagram-node-clickable" data-policy-scope-segment="${escapeAttr(segment.key || "")}">
+            <rect x="${segmentX}" y="${segmentY}" width="${segmentW}" height="${segmentH}" rx="16" fill="${segmentFill}" stroke="${segmentColor}" stroke-width="4" />
+            <rect x="${segmentX}" y="${segmentY}" width="10" height="${segmentH}" rx="5" fill="${segmentColor}" />
+            ${svgFitText(segment.name || "Unnamed segment", segmentX + 26, segmentY + 34, segmentW - 52, { fontSize: 22, minFontSize: 12, weight: 900, fill: "#111827" })}
+            ${svgFitText(segmentParent(segment.path) || segment.path || "No parent", segmentX + 26, segmentY + 62, segmentW - 52, { fontSize: 14, minFontSize: 10, weight: 750, fill: "#64748b" })}
+            ${svgFitText(segmentUsageLabel(segment), segmentX + 26, segmentY + 88, segmentW - 52, { fontSize: 14, minFontSize: 10, weight: 850, fill: segmentColor })}
+          </g>
+          ${policyRows || `<text x="${policyX}" y="${Math.round(height / 2)}" font-size="18" font-weight="800" fill="#64748b">No policy references recorded.</text>`}
+        </svg>
+      </div>
+    </div>
+  `;
+}
+
+function renderPolicyConflictDiagramSvg(group, view = policyConflictView(group)) {
+  const policies = view.policies || [];
+  const segments = view.segments || [];
+  const segmentCount = Math.max(1, segments.length);
+  const policyCount = Math.max(1, policies.length);
+  const rowHeight = 118;
+  const width = 1760;
+  const height = Math.max(480, 150 + Math.max(segmentCount, policyCount) * rowHeight);
+  const rangeX = 48;
+  const rangeW = 310;
+  const rangeH = 112;
+  const rangeY = Math.round(height / 2 - rangeH / 2);
+  const segmentX = 520;
+  const segmentW = 410;
+  const segmentH = 76;
+  const policyX = 1120;
+  const policyW = 570;
+  const policyH = 78;
+  const rangeCenterX = rangeX + rangeW;
+  const rangeCenterY = rangeY + rangeH / 2;
+  const segmentStartY = Math.max(114, Math.round((height - segments.length * rowHeight) / 2));
+  const policyStartY = Math.max(114, Math.round((height - policies.length * rowHeight) / 2));
+  const segmentPositions = new Map();
+  const segmentRows = segments
+    .map((segment, index) => {
+      const y = segmentStartY + index * rowHeight;
+      const centerY = y + segmentH / 2;
+      const color = segment.used ? "#15803d" : "#b42318";
+      const fill = segment.used ? "#f0fdf4" : "#fff1f2";
+      const active = view.scopeSegment === segment.key;
+      segmentPositions.set(segment.key, { x: segmentX + segmentW, y: centerY, segment });
+      return `
+        <path d="M ${rangeCenterX} ${rangeCenterY} C ${rangeCenterX + 105} ${rangeCenterY}, ${segmentX - 105} ${centerY}, ${segmentX} ${centerY}" fill="none" stroke="${color}" stroke-width="3" stroke-linecap="round" opacity="0.65" />
+        <g class="diagram-node-clickable" data-policy-scope-segment="${escapeAttr(segment.key)}">
+          <rect x="${segmentX}" y="${y}" width="${segmentW}" height="${segmentH}" rx="14" fill="${fill}" stroke="${active ? "#2563eb" : color}" stroke-width="${active ? 4 : 2}" />
+          <rect x="${segmentX}" y="${y}" width="9" height="${segmentH}" rx="4" fill="${color}" />
+          ${svgFitText(segment.name || "Unnamed segment", segmentX + 24, y + 27, segmentW - 150, { fontSize: 19, minFontSize: 11, weight: 850, fill: "#111827" })}
+          ${svgFitText(segmentParent(segment.path) || segment.path || "No parent", segmentX + 24, y + 51, segmentW - 160, { fontSize: 13, minFontSize: 9, weight: 750, fill: "#64748b" })}
+          ${svgFitText(segmentUsageLabel(segment), segmentX + segmentW - 20, y + 31, 132, { fontSize: 11, minFontSize: 8, weight: 850, fill: color, anchor: "end" })}
+          ${svgFitText(categoryPillsText(segment), segmentX + segmentW - 20, y + 53, 132, { fontSize: 11, minFontSize: 8, weight: 800, fill: "#64748b", anchor: "end" })}
+        </g>
+      `;
+    })
+    .join("");
+  const policyRows = policies
+    .map((policy, index) => {
+      const y = policyStartY + index * rowHeight;
+      const centerY = y + policyH / 2;
+      const inbound = (policy.segments || [])
+        .map((segment) => {
+          const start = segmentPositions.get(segment.key);
+          if (!start) return "";
+          const color = segment.used ? "#15803d" : "#b42318";
+          return `<path d="M ${start.x} ${start.y} C ${start.x + 100} ${start.y}, ${policyX - 100} ${centerY}, ${policyX} ${centerY}" fill="none" stroke="${color}" stroke-width="2.4" stroke-linecap="round" opacity="0.55" />`;
+        })
+        .join("");
+      const active = view.scopePolicy === policy.policy;
+      return `
+        ${inbound}
+        <g class="diagram-node-clickable" data-policy-scope-policy="${escapeAttr(policy.policy || "Unnamed policy")}">
+          <rect x="${policyX}" y="${y}" width="${policyW}" height="${policyH}" rx="14" fill="#eff6ff" stroke="#2563eb" stroke-width="${active ? 4 : 2}" />
+          <rect x="${policyX}" y="${y}" width="9" height="${policyH}" rx="4" fill="#2563eb" />
+          ${svgFitText(policy.policy || "Unnamed policy", policyX + 24, y + 28, policyW - 205, { fontSize: 18, minFontSize: 10, weight: 850, fill: "#111827" })}
+          ${svgFitText(`${formatNumber(policy.segments.length)} segments: ${policy.segments.map((segment) => segment.name).join(", ")}`, policyX + 24, y + 52, policyW - 46, { fontSize: 13, minFontSize: 9, weight: 750, fill: "#64748b" })}
+          ${svgFitText(`${formatNumber(policy.sources.length)} source${policy.sources.length === 1 ? "" : "s"}`, policyX + policyW - 22, y + 29, 150, { fontSize: 12, minFontSize: 9, weight: 850, fill: "#2563eb", anchor: "end" })}
+        </g>
+      `;
+    })
+    .join("");
+  return `
+    <div class="range-diagram-card">
+      <div class="diagram-head">
+        <div>
+          <span class="eyebrow">Conflict policy diagram</span>
+          <strong>${escapeHtml(group.range)}</strong>
+        </div>
+        <span class="muted">${formatNumber(view.segments.length)} of ${formatNumber(group.segments.length)} segments, ${formatNumber(view.policies.length)} of ${formatNumber(group.policies.length)} policies</span>
+      </div>
+      <div class="range-diagram-scroll">
+        <svg class="range-diagram-svg policy-diagram-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Range conflict policy diagram">
+          <rect width="${width}" height="${height}" fill="#ffffff" />
+          <text x="${rangeX}" y="42" font-size="18" font-weight="800" fill="#64748b">CONFLICTING RANGE</text>
+          <text x="${segmentX}" y="42" font-size="18" font-weight="800" fill="#64748b">${view.scopeType === "policy" ? "SEGMENTS USED BY POLICY" : "ATTACHED SEGMENTS"}</text>
+          <text x="${policyX}" y="42" font-size="18" font-weight="800" fill="#64748b">${view.scopeType === "segment" ? "POLICIES USING SEGMENT" : "CONSOLIDATED POLICIES IN USE"}</text>
+          <g class="diagram-node-clickable" data-policy-scope-range="${escapeAttr(group.range)}">
+            <rect x="${rangeX}" y="${rangeY}" width="${rangeW}" height="${rangeH}" rx="16" fill="${group.liveHostCount ? "#fff1f2" : "#eff6ff"}" stroke="${group.liveHostCount ? "#b42318" : "#2563eb"}" stroke-width="3" />
+            ${svgFitText(group.range, rangeX + 22, rangeY + 38, rangeW - 44, { fontSize: 23, minFontSize: 13, weight: 900, fill: "#111827" })}
+            ${svgFitText(`${formatNumber(group.ipCount || 0)} IPs in range`, rangeX + 22, rangeY + 68, rangeW - 44, { fontSize: 15, minFontSize: 10, weight: 800, fill: "#64748b" })}
+            ${svgFitText(`${formatNumber(group.liveHostCount || 0)} live hosts`, rangeX + 22, rangeY + 92, rangeW - 44, { fontSize: 15, minFontSize: 10, weight: 850, fill: group.liveHostCount ? "#b42318" : "#15803d" })}
+          </g>
+          ${segmentRows}
+          ${policyRows || `<text x="${policyX}" y="${Math.round(height / 2)}" font-size="18" font-weight="800" fill="#64748b">No direct policy references recorded.</text>`}
+        </svg>
+      </div>
+    </div>
+  `;
+}
+
+function renderPolicyConflictDetails(group, view = policyConflictView(group)) {
+  if (view.scopeType === "segment") return renderPolicySegmentScopeDetails(view);
+  const heading =
+    view.scopeType === "policy"
+        ? "Segments assigned to selected policy"
+        : "Consolidated policy usage for this conflict";
+  return `
+    <div class="range-row-list">
+      <h3>${escapeHtml(heading)}</h3>
+      ${
+        view.policies.length
+          ? view.policies
+              .map(
+                (policy) => `
+                  <article class="range-row-card ${view.scopePolicy === policy.policy ? "selected" : ""}">
+                    <div class="range-row-stage">
+                      <span class="pill good">${formatNumber(policy.segments.length)} segment${policy.segments.length === 1 ? "" : "s"}</span>
+                      <span class="pill">${formatNumber(policy.sources.length)} source${policy.sources.length === 1 ? "" : "s"}</span>
+                      <button class="link-button" type="button" data-policy-scope-policy="${escapeAttr(policy.policy || "Unnamed policy")}">Show policy segments</button>
+                    </div>
+                    <h4>${escapeHtml(policy.policy || "Unnamed policy")}</h4>
+                    <div class="range-chip-list">${policy.sources.map((source) => `<span class="pill">${escapeHtml(source)}</span>`).join("")}</div>
+                    <div class="segment-visual-grid compact">
+                      ${policy.segments
+                        .map(
+                          (segment) => `
+                            <div class="range-segment-card clickable-card ${segment.used ? "used" : "unused"} ${view.scopeSegment === segment.key ? "selected" : ""}" data-policy-scope-segment="${escapeAttr(segment.key || "")}">
+                              <div class="segment-title">${escapeHtml(segment.name || "Unnamed segment")}</div>
+                              <div class="muted">${escapeHtml(segment.path || "No hierarchy")}</div>
+                              <div class="range-chip-list">
+                                <span class="pill ${segment.used ? "good" : "danger"}">${escapeHtml(segmentUsageLabel(segment))}</span>
+                                ${segment.ranges.map((range) => rangeLink(range, range, "pill")).join("")}
+                              </div>
+                            </div>
+                          `
+                        )
+                        .join("")}
+                    </div>
+                  </article>
+                `
+              )
+              .join("")
+          : `<div class="empty">No policies were found for this selection.</div>`
+      }
+    </div>
+  `;
+}
+
+function renderPolicySegmentScopeDetails(view) {
+  return `
+    <div class="range-row-list">
+      <h3>Conflicting ranges and USED policies for selected segment</h3>
+      <div class="segment-visual-grid compact">
+        ${(view.ranges || [])
+          .map(
+            (item) => `
+              <article class="range-segment-card ${item.range === state.selectedRange ? "selected" : ""}">
+                <div class="range-row-stage">
+                  <button class="pill clickable-range" type="button" data-policy-scope-range="${escapeAttr(item.range)}"><strong>${escapeHtml(item.range)}</strong></button>
+                  <span class="pill ${item.liveHostCount ? "danger" : "good"}">${formatNumber(item.liveHostCount || 0)} live hosts</span>
+                  ${(item.stageLabels || []).map((label) => `<span class="pill">${escapeHtml(label)}</span>`).join("")}
+                </div>
+                <div class="muted">${formatNumber(item.ipCount || 0)} IPs in conflicting range</div>
+                <div class="policy-ref-list">
+                  ${(item.policies || []).length ? item.policies.map((policy) => `<span>${escapeHtml(policy.policy || "Unnamed policy")} <em>${formatNumber(policy.sources?.length || 0)} sources</em></span>`).join("") : `<span>No policy references for this range.</span>`}
+                </div>
+              </article>
+            `
+          )
+          .join("")}
+      </div>
+      <h3>Consolidated policies mapped to this segment</h3>
+      ${
+        (view.policies || []).length
+          ? view.policies
+              .map(
+                (policy) => `
+                  <article class="range-row-card ${view.scopePolicy === policy.policy ? "selected" : ""}">
+                    <div class="range-row-stage">
+                      <span class="pill good">${formatNumber(policy.ranges?.length || 0)} conflicting range${(policy.ranges?.length || 0) === 1 ? "" : "s"}</span>
+                      <span class="pill">${formatNumber(policy.sources?.length || 0)} source${(policy.sources?.length || 0) === 1 ? "" : "s"}</span>
+                      <button class="link-button" type="button" data-policy-scope-policy="${escapeAttr(policy.policy || "Unnamed policy")}">Show policy segments</button>
+                    </div>
+                    <h4>${escapeHtml(policy.policy || "Unnamed policy")}</h4>
+                    <div class="range-chip-list">
+                      ${(policy.ranges || []).map((range) => `<button class="pill clickable-range" type="button" data-policy-scope-range="${escapeAttr(range)}"><strong>${escapeHtml(range)}</strong></button>`).join("")}
+                    </div>
+                    <div class="range-chip-list">${(policy.sources || []).map((source) => `<span class="pill">${escapeHtml(source)}</span>`).join("")}</div>
+                  </article>
+                `
+              )
+              .join("")
+          : `<div class="empty">No policies were found for this segment.</div>`
+      }
+    </div>
+  `;
+}
+
 function renderRangeDiagramSvg(group) {
   const segments = group.segments || [];
   const rowHeight = 96;
@@ -757,7 +1271,7 @@ function renderRangeDiagramSvg(group) {
           <rect x="${segmentX}" y="${y}" width="9" height="${segmentH}" rx="4" fill="${color}" />
           ${svgFitText(segment.name || "Unnamed segment", segmentX + 24, y + 26, segmentW - 170, { fontSize: 20, minFontSize: 13, weight: 800, fill: "#111827" })}
           ${svgFitText(segmentParent(segment.path) || segment.path || "No parent", segmentX + 24, y + 49, segmentW - 190, { fontSize: 15, minFontSize: 11, weight: 700, fill: "#64748b" })}
-          ${svgFitText(segment.used ? "USED" : "NOT USED", segmentX + segmentW - 24, y + 28, 118, { fontSize: 13, minFontSize: 10, weight: 800, fill: color, anchor: "end" })}
+          ${svgFitText(segmentUsageLabel(segment), segmentX + segmentW - 24, y + 28, 140, { fontSize: 12, minFontSize: 8, weight: 800, fill: color, anchor: "end" })}
           ${svgFitText(categories, segmentX + segmentW - 24, y + 51, 150, { fontSize: 13, minFontSize: 10, weight: 800, fill: "#64748b", anchor: "end" })}
         </g>
         ${group.liveHostCount ? `<circle cx="${segmentX - 16}" cy="${centerY}" r="7" fill="${liveFill}" stroke="#b42318" stroke-width="2" />` : ""}
@@ -804,8 +1318,7 @@ function renderSegmentVisualization(segment, actions, liveEdit) {
         <div class="muted">${escapeHtml(segment.path || "No hierarchy")}</div>
       </div>
       <div class="range-chip-list">
-        <span class="pill ${segment.used ? "good" : "danger"}">${segment.used ? "Used in policy" : "Not used in policy"}</span>
-        <span class="pill">${formatNumber(segment.policyReferenceCount || 0)} policy refs</span>
+        <span class="pill ${segment.used ? "good" : "danger"}">${escapeHtml(segmentUsageLabel(segment))}</span>
         <span class="pill">${formatNumber(segment.conflictRanges.length)} conflict ranges</span>
         <span class="pill ${endpoints.length ? "danger" : "good"}">${formatNumber(endpoints.length)} live endpoints</span>
         ${categoryPills(segment).join("")}
@@ -887,8 +1400,8 @@ function renderSegmentDiagramSvg(segment) {
               <rect x="${otherX}" y="${y}" width="9" height="${otherH}" rx="4" fill="${otherColor}" />
               ${svgFitText(other.name || "Unnamed segment", otherX + 24, y + 25, otherW - 160, { fontSize: 18, minFontSize: 11, weight: 850, fill: "#111827" })}
               ${svgFitText(segmentParent(other.path) || other.path || "No parent", otherX + 24, y + 47, otherW - 170, { fontSize: 13, minFontSize: 10, weight: 750, fill: "#64748b" })}
-              ${svgFitText(other.used ? "USED" : "NOT USED", otherX + otherW - 22, y + 26, 110, { fontSize: 12, minFontSize: 9, weight: 850, fill: otherColor, anchor: "end" })}
-              ${svgFitText(`${formatNumber(other.policyReferenceCount || 0)} refs`, otherX + otherW - 22, y + 48, 110, { fontSize: 12, minFontSize: 9, weight: 800, fill: "#64748b", anchor: "end" })}
+              ${svgFitText(segmentUsageLabel(other), otherX + otherW - 22, y + 26, 132, { fontSize: 11, minFontSize: 8, weight: 850, fill: otherColor, anchor: "end" })}
+              ${svgFitText(categoryPillsText(other), otherX + otherW - 22, y + 48, 110, { fontSize: 11, minFontSize: 8, weight: 800, fill: "#64748b", anchor: "end" })}
             </g>
           `;
         })
@@ -927,7 +1440,7 @@ function renderSegmentDiagramSvg(segment) {
             <rect x="${segmentX}" y="${segmentY}" width="11" height="${segmentH}" rx="5" fill="${selectedColor}" />
             ${svgFitText(segment.name || "Unnamed segment", segmentX + 26, segmentY + 38, segmentW - 52, { fontSize: 24, minFontSize: 13, weight: 900, fill: "#111827" })}
             ${svgFitText(segmentParent(segment.path) || segment.path || "No parent", segmentX + 26, segmentY + 68, segmentW - 52, { fontSize: 15, minFontSize: 10, weight: 800, fill: "#64748b" })}
-            ${svgFitText(segment.used ? "USED in policy" : "NOT USED in policy", segmentX + 26, segmentY + 95, segmentW - 170, { fontSize: 15, minFontSize: 10, weight: 850, fill: selectedColor })}
+            ${svgFitText(segmentUsageLabel(segment), segmentX + 26, segmentY + 95, segmentW - 170, { fontSize: 15, minFontSize: 9, weight: 850, fill: selectedColor })}
             ${svgFitText(`${formatNumber(segment.liveIps?.length || 0)} live IPs`, segmentX + segmentW - 24, segmentY + 95, 130, { fontSize: 15, minFontSize: 10, weight: 850, fill: "#64748b", anchor: "end" })}
           </g>
           ${diagramRows}
@@ -1061,7 +1574,7 @@ function renderIpDiagramSvg(item) {
               <rect x="${segmentX}" y="${y}" width="9" height="${segmentH}" rx="4" fill="${color}" />
               ${svgFitText(segment.name || "Unnamed segment", segmentX + 24, y + 25, segmentW - 160, { fontSize: 18, minFontSize: 11, weight: 850, fill: "#111827" })}
               ${svgFitText(segmentParent(segment.path) || segment.path || "No parent", segmentX + 24, y + 47, segmentW - 170, { fontSize: 13, minFontSize: 10, weight: 750, fill: "#64748b" })}
-              ${svgFitText(segment.used ? "USED" : "NOT USED", segmentX + segmentW - 22, y + 26, 110, { fontSize: 12, minFontSize: 9, weight: 850, fill: color, anchor: "end" })}
+              ${svgFitText(segmentUsageLabel(segment), segmentX + segmentW - 22, y + 26, 132, { fontSize: 11, minFontSize: 8, weight: 850, fill: color, anchor: "end" })}
             </g>
           `;
         })
@@ -1173,8 +1686,7 @@ function segmentMiniCard(label, segment = {}) {
       <strong>${escapeHtml(segment.name || "Unnamed segment")}</strong>
       <div class="muted">${escapeHtml(segmentParent(segment.path) || segment.path || "No parent")}</div>
       <div class="range-chip-list">
-        <span class="pill ${segment.used ? "good" : "danger"}">${segment.used ? "USED" : "NOT USED"}</span>
-        <span class="pill">${formatNumber(segment.policy_reference_count || 0)} policy refs</span>
+        <span class="pill ${segment.used ? "good" : "danger"}">${escapeHtml(segmentUsageLabel(segment))}</span>
         ${segment.range ? rangeLink(segment.range, segment.range, "pill") : `<span class="pill">No source range</span>`}
       </div>
     </div>
@@ -1188,8 +1700,7 @@ function rangeSegmentCard(segment, liveHostCount) {
       <div class="muted">${escapeHtml(segment.path || "No hierarchy")}</div>
       <div class="range-chip-list">
         ${categoryPills(segment).join("")}
-        <span class="pill ${segment.used ? "good" : "danger"}">${segment.used ? "Used in policy" : "Not used in policy"}</span>
-        <span class="pill">${formatNumber(segment.policyReferenceCount || 0)} policy refs</span>
+        <span class="pill ${segment.used ? "good" : "danger"}">${escapeHtml(segmentUsageLabel(segment))}</span>
         ${liveHostCount ? `<span class="pill danger">${formatNumber(liveHostCount)} live hosts in overlap</span>` : ""}
       </div>
       <div class="range-chip-list">${segment.ranges.map((range) => rangeLink(range, range, "pill")).join("") || `<span class="muted">No conflict ranges recorded.</span>`}</div>
@@ -1345,8 +1856,7 @@ function segmentBox(segment) {
       <div class="segment-title">${escapeHtml(segment.name || "Unnamed segment")}</div>
       <div class="muted">${escapeHtml(segment.path || "No hierarchy")}</div>
       <div class="range-chip-list">
-        <span class="pill ${segment.used ? "good" : "danger"}">${segment.used ? "USED" : "NOT USED"}</span>
-        <span class="pill">${formatNumber(segment.policy_reference_count || 0)} direct policy refs</span>
+        <span class="pill ${segment.used ? "good" : "danger"}">${escapeHtml(segmentUsageLabel(segment))}</span>
       </div>
       <div class="range-chip-list">${segment.range ? rangeLink(segment.range, segment.range, "pill") : `<span class="muted">No source range</span>`}</div>
     </div>
@@ -1394,7 +1904,7 @@ function renderZeroRanges(stage, rows) {
           rows.length
             ? `<table><thead><tr><th>Name</th><th>Hierarchy</th><th>Usage</th><th>Children</th></tr></thead><tbody>${rows
                 .map(
-                  (row) => `<tr><td><strong>${escapeHtml(row.name)}</strong></td><td>${escapeHtml(row.path)}</td><td>${row.used ? "USED - review manually" : "NOT USED"}</td><td>${formatNumber(row.child_count || 0)}</td></tr>`
+                  (row) => `<tr><td><strong>${escapeHtml(row.name)}</strong></td><td>${escapeHtml(row.path)}</td><td>${escapeHtml(segmentUsageLabel(row))}${row.used ? " - review manually" : ""}</td><td>${formatNumber(row.child_count || 0)}</td></tr>`
                 )
                 .join("")}</tbody></table>`
             : `<div class="empty">No live zero-range segments are currently present.</div>`
@@ -1451,7 +1961,52 @@ function wireEvents(root) {
   root.querySelectorAll("[data-range-select]").forEach((button) => {
     button.addEventListener("click", () => {
       state.selectedRange = button.dataset.rangeSelect || "";
+      state.selectedPolicyConflictSegment = "";
+      state.selectedPolicyConflictPolicy = "";
       localStorage.setItem("selectedRange", state.selectedRange);
+      localStorage.removeItem("selectedPolicyConflictSegment");
+      localStorage.removeItem("selectedPolicyConflictPolicy");
+      render();
+    });
+  });
+  root.querySelectorAll("[data-policy-scope-segment]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      state.selectedPolicyConflictSegment = button.dataset.policyScopeSegment || "";
+      state.selectedPolicyConflictPolicy = "";
+      localStorage.setItem("selectedPolicyConflictSegment", state.selectedPolicyConflictSegment);
+      localStorage.removeItem("selectedPolicyConflictPolicy");
+      render();
+    });
+  });
+  root.querySelectorAll("[data-policy-scope-range]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      state.selectedRange = button.dataset.policyScopeRange || "";
+      state.selectedPolicyConflictSegment = "";
+      state.selectedPolicyConflictPolicy = "";
+      localStorage.setItem("selectedRange", state.selectedRange);
+      localStorage.removeItem("selectedPolicyConflictSegment");
+      localStorage.removeItem("selectedPolicyConflictPolicy");
+      render();
+    });
+  });
+  root.querySelectorAll("[data-policy-scope-policy]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      state.selectedPolicyConflictPolicy = button.dataset.policyScopePolicy || "";
+      state.selectedPolicyConflictSegment = "";
+      localStorage.setItem("selectedPolicyConflictPolicy", state.selectedPolicyConflictPolicy);
+      localStorage.removeItem("selectedPolicyConflictSegment");
+      render();
+    });
+  });
+  root.querySelectorAll("[data-clear-policy-conflict-scope]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedPolicyConflictSegment = "";
+      state.selectedPolicyConflictPolicy = "";
+      localStorage.removeItem("selectedPolicyConflictSegment");
+      localStorage.removeItem("selectedPolicyConflictPolicy");
       render();
     });
   });
@@ -1886,17 +2441,22 @@ function resetLocalWorkspaceState() {
     "selectedRange",
     "selectedSegment",
     "selectedIp",
+    "selectedPolicyConflictSegment",
+    "selectedPolicyConflictPolicy",
     "visualizationLens",
     "hostIpSource",
     "vizFilter:ranges",
     "vizFilter:segments",
     "vizFilter:ips",
+    "vizFilter:policies",
   ].forEach((key) => localStorage.removeItem(key));
   state.selectedRange = "";
   state.selectedSegment = "";
   state.selectedIp = "";
+  state.selectedPolicyConflictSegment = "";
+  state.selectedPolicyConflictPolicy = "";
   state.visualizationLens = "ranges";
-  state.visualizationFilters = { ranges: "", segments: "", ips: "" };
+  state.visualizationFilters = { ranges: "", segments: "", ips: "", policies: "" };
 }
 
 function stageActions(stageKey, rows) {
@@ -1950,6 +2510,46 @@ function rangeGroups() {
         .sort((a, b) => Number(b.used) - Number(a.used) || a.name.localeCompare(b.name)),
     }))
     .sort((a, b) => b.liveHostCount - a.liveHostCount || b.rows.length - a.rows.length || a.range.localeCompare(b.range));
+}
+
+function rangePolicyGroups(groups = rangeGroups()) {
+  return groups
+    .map((group) => {
+      const policies = new Map();
+      group.segments.forEach((segment) => {
+        (segment.policyReferences || []).forEach((ref) => {
+          const policyName = String(ref.policy || "Unnamed policy").trim() || "Unnamed policy";
+          if (!policies.has(policyName)) {
+            policies.set(policyName, {
+              policy: policyName,
+              sources: new Set(),
+              segmentsByKey: new Map(),
+            });
+          }
+          const policy = policies.get(policyName);
+          if (ref.source) policy.sources.add(ref.source);
+          if (!policy.segmentsByKey.has(segment.key)) {
+            policy.segmentsByKey.set(segment.key, {
+              ...segment,
+              ranges: Array.from(segment.ranges || []),
+              allRanges: Array.from(segment.allRanges || []),
+              policyReferences: [],
+            });
+          }
+          policy.segmentsByKey.get(segment.key).policyReferences.push(ref);
+        });
+      });
+      const consolidated = Array.from(policies.values())
+        .map((policy) => ({
+          ...policy,
+          sources: Array.from(policy.sources).sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" })),
+          segments: Array.from(policy.segmentsByKey.values()).sort((a, b) => Number(b.used) - Number(a.used) || a.name.localeCompare(b.name)),
+        }))
+        .sort((a, b) => b.segments.length - a.segments.length || a.policy.localeCompare(b.policy, undefined, { numeric: true, sensitivity: "base" }));
+      return { ...group, policies: consolidated };
+    })
+    .filter((group) => group.policies.length)
+    .sort((a, b) => b.liveHostCount - a.liveHostCount || b.policies.length - a.policies.length || a.range.localeCompare(b.range));
 }
 
 function addRangeSegment(group, segment = {}, stageKey = "") {
@@ -2389,12 +2989,22 @@ function mergePolicyReferences(existing = [], incoming = []) {
   return output;
 }
 
+function segmentPolicyCount(segment = {}) {
+  return Number(segment.policyReferenceCount ?? segment.policy_reference_count ?? 0) || 0;
+}
+
+function segmentUsageLabel(segment = {}) {
+  if (!segment?.used) return "NOT USED (0 policies)";
+  const count = segmentPolicyCount(segment);
+  return `USED (${formatNumber(count)} ${count === 1 ? "policy" : "policies"})`;
+}
+
 function sameSegment(left = {}, right = {}) {
   return (left.key && right.key && left.key === right.key) || (left.path && right.path && left.path === right.path && left.name === right.name);
 }
 
 function updateVisualizationFilter(lens, value) {
-  if (!["ranges", "segments", "ips"].includes(lens)) return;
+  if (!["ranges", "segments", "ips", "policies"].includes(lens)) return;
   state.visualizationFilters[lens] = value || "";
   localStorage.setItem(`vizFilter:${lens}`, state.visualizationFilters[lens]);
   render();
