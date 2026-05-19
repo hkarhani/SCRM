@@ -595,6 +595,7 @@ def build_analysis() -> dict[str, Any]:
     usage = build_policy_segment_usage(policies.get("policies") or [], xml_segments.get("segments") or [], live_segments)
     host_ips = [host["ip"] for host in host_snapshot.get("hosts") or [] if host.get("ip")]
     conflicts = detect_conflicts(live_segments, usage, host_ips)
+    mapping = build_segment_policy_mapping(live_segments, usage, conflicts, policies.get("policies") or [])
     zero_ranges = [
         {
             **usage.get(segment["key"], {}),
@@ -625,6 +626,7 @@ def build_analysis() -> dict[str, Any]:
             "lower_review": conflicts["lower_review"],
             "zero_ranges": zero_ranges,
         },
+        "mapping": mapping,
     }
 
 
@@ -1303,9 +1305,133 @@ def build_policy_segment_usage(policies: list[dict[str, Any]], xml_segments: lis
             "direct_used": direct,
             "used_reason": "direct policy segment" if direct else "under policy-used parent" if inherited_from else "",
             "policy_reference_count": len(references),
-            "policy_references": references[:25],
+            "policy_references": references,
         }
     return usage
+
+
+def build_segment_policy_mapping(
+    live_segments: list[dict[str, Any]],
+    usage: dict[str, dict[str, Any]],
+    conflicts: dict[str, list[dict[str, Any]]],
+    policies: list[dict[str, Any]],
+) -> dict[str, Any]:
+    conflicting_ranges_by_segment: dict[str, set[str]] = {}
+    conflict_categories_by_segment: dict[str, set[str]] = {}
+    for stage_key, rows in conflicts.items():
+        for row in rows:
+            overlap = str(row.get("overlap_range") or "")
+            for side in ("left", "right"):
+                segment = row.get(side) or {}
+                segment_key = str(segment.get("key") or "")
+                if not segment_key:
+                    continue
+                if overlap:
+                    conflicting_ranges_by_segment.setdefault(segment_key, set()).add(overlap)
+                conflict_categories_by_segment.setdefault(segment_key, set()).add(stage_key)
+
+    policy_lookup = {str(policy.get("name") or ""): policy for policy in policies}
+    policy_segments: dict[str, dict[str, Any]] = {}
+    segment_rows: list[dict[str, Any]] = []
+    for segment in live_segments:
+        segment_key = str(segment.get("key") or "")
+        segment_usage = usage.get(segment_key, {})
+        references = segment_usage.get("policy_references") or []
+        conflict_ranges = sorted(conflicting_ranges_by_segment.get(segment_key, set()), key=lambda value: [_ip_sort_token(value), value])
+        categories = sorted(conflict_categories_by_segment.get(segment_key, set()))
+        row = {
+            "key": segment_key,
+            "name": segment.get("name", ""),
+            "path": segment.get("path", ""),
+            "depth": segment.get("depth", 0),
+            "ranges": segment.get("ranges") or [],
+            "child_count": segment.get("child_count", 0),
+            "used": bool(segment_usage.get("used")),
+            "direct_used": bool(segment_usage.get("direct_used")),
+            "used_reason": segment_usage.get("used_reason", ""),
+            "policy_reference_count": int(segment_usage.get("policy_reference_count") or 0),
+            "policy_references": references,
+            "has_conflicts": bool(conflict_ranges),
+            "conflict_range_count": len(conflict_ranges),
+            "conflicting_ranges": conflict_ranges,
+            "categories": categories,
+        }
+        segment_rows.append(row)
+        for reference in references:
+            policy_name = str(reference.get("policy") or "Unnamed policy").strip() or "Unnamed policy"
+            if policy_name not in policy_segments:
+                policy = policy_lookup.get(policy_name, {})
+                policy_segments[policy_name] = {
+                    "policy": policy_name,
+                    "folder": policy.get("folder", ""),
+                    "enabled": bool(policy.get("enabled", True)),
+                    "sources": set(),
+                    "segments": {},
+                }
+            stored = policy_segments[policy_name]
+            if reference.get("source"):
+                stored["sources"].add(str(reference.get("source")))
+            stored["segments"][segment_key] = {
+                "key": segment_key,
+                "name": segment.get("name", ""),
+                "path": segment.get("path", ""),
+                "used": bool(segment_usage.get("used")),
+                "has_conflicts": bool(conflict_ranges),
+                "conflict_range_count": len(conflict_ranges),
+                "conflicting_ranges": conflict_ranges,
+            }
+
+    policy_rows = []
+    for policy in policy_segments.values():
+        segments = sorted(
+            policy["segments"].values(),
+            key=lambda segment: (not segment.get("has_conflicts"), str(segment.get("path", "")).casefold(), str(segment.get("name", "")).casefold()),
+        )
+        conflicting_segment_count = sum(1 for segment in segments if segment.get("has_conflicts"))
+        policy_rows.append(
+            {
+                "policy": policy["policy"],
+                "folder": policy.get("folder", ""),
+                "enabled": policy.get("enabled", True),
+                "sources": sorted(policy["sources"], key=lambda value: value.casefold()),
+                "segments": segments,
+                "segment_count": len(segments),
+                "conflicting_segment_count": conflicting_segment_count,
+                "mapping_state": "conflicting_segments" if conflicting_segment_count else "clean_segments",
+            }
+        )
+
+    for policy in policies:
+        policy_name = str(policy.get("name") or "Unnamed policy").strip() or "Unnamed policy"
+        if policy_name in policy_segments:
+            continue
+        policy_rows.append(
+            {
+                "policy": policy_name,
+                "folder": policy.get("folder", ""),
+                "enabled": bool(policy.get("enabled", True)),
+                "sources": [],
+                "segments": [],
+                "segment_count": 0,
+                "conflicting_segment_count": 0,
+                "mapping_state": "no_segments",
+            }
+        )
+
+    segment_rows.sort(key=lambda segment: (str(segment.get("path", "")).casefold(), str(segment.get("name", "")).casefold()))
+    policy_rows.sort(key=lambda policy: (-int(policy.get("conflicting_segment_count") or 0), str(policy.get("policy", "")).casefold()))
+    return {
+        "segments": segment_rows,
+        "policies": policy_rows,
+        "summary": {
+            "segments": len(segment_rows),
+            "policies": len(policy_rows),
+            "conflicting_segments": sum(1 for segment in segment_rows if segment.get("has_conflicts")),
+            "clean_segments": sum(1 for segment in segment_rows if not segment.get("has_conflicts")),
+            "policies_without_segments": sum(1 for policy in policy_rows if policy.get("mapping_state") == "no_segments"),
+            "policies_linked_to_conflicting_segments": sum(1 for policy in policy_rows if policy.get("mapping_state") == "conflicting_segments"),
+        },
+    }
 
 
 def parse_policies_xml(content: bytes) -> dict[str, Any]:
@@ -1730,6 +1856,13 @@ def format_ip_range(start: int, end: int) -> str:
     left = str(ipaddress.IPv4Address(start))
     right = str(ipaddress.IPv4Address(end))
     return left if start == end else f"{left}-{right}"
+
+
+def _ip_sort_token(value: str) -> tuple[int, int]:
+    parsed = parse_ip_range(value)
+    if not parsed:
+        return (0, 0)
+    return (int(parsed["start"]), int(parsed["end"]))
 
 
 def authoritative_segment(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:

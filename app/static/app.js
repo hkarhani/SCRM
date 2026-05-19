@@ -14,13 +14,22 @@ const state = {
   documents: [],
   activePage: localStorage.getItem("activePage") || "workflow",
   activeStage: "used_wins",
-  visualizationLens: localStorage.getItem("visualizationLens") || "ranges",
+  visualizationLens: localStorage.getItem("visualizationLens") || "mapping",
   selectedRange: localStorage.getItem("selectedRange") || "",
   selectedSegment: localStorage.getItem("selectedSegment") || "",
   selectedIp: localStorage.getItem("selectedIp") || "",
+  selectedMappingSegment: localStorage.getItem("selectedMappingSegment") || "",
+  selectedMappingPolicy: localStorage.getItem("selectedMappingPolicy") || "",
+  mappingSegmentScope: localStorage.getItem("mappingSegmentScope") || "all",
+  hideUnmappedMappingPolicies: localStorage.getItem("hideUnmappedMappingPolicies") === "true",
   selectedPolicyConflictSegment: localStorage.getItem("selectedPolicyConflictSegment") || "",
   selectedPolicyConflictPolicy: localStorage.getItem("selectedPolicyConflictPolicy") || "",
+  collapsedPolicySegments: readJsonStorage("collapsedPolicySegments", {}),
+  collapsedPolicyRanges: readJsonStorage("collapsedPolicyRanges", {}),
+  hiddenPolicyNonConflictRanges: readJsonStorage("hiddenPolicyNonConflictRanges", {}),
+  hiddenMappingSegmentLinks: readJsonStorage("hiddenMappingSegmentLinks", {}),
   visualizationFilters: {
+    mapping: localStorage.getItem("vizFilter:mapping") || "",
     ranges: localStorage.getItem("vizFilter:ranges") || "",
     segments: localStorage.getItem("vizFilter:segments") || "",
     ips: localStorage.getItem("vizFilter:ips") || "",
@@ -406,11 +415,12 @@ function renderActivePage() {
 }
 
 function renderRangeInvestigationPage() {
+  const mapping = segmentPolicyMapping();
   const groups = rangeGroups();
   const segments = segmentGroups(groups);
   const ips = ipGroups(groups);
   const policyGroups = rangePolicyGroups(groups);
-  if (!groups.length) {
+  if (!groups.length && !mapping.segments.length) {
     return `
       <section class="panel">
         <div class="panel-head">
@@ -423,8 +433,9 @@ function renderRangeInvestigationPage() {
       </section>
     `;
   }
-  const lens = ["ranges", "segments", "ips", "policies"].includes(state.visualizationLens) ? state.visualizationLens : "ranges";
+  const lens = ["mapping", "ranges", "segments", "ips", "policies"].includes(state.visualizationLens) ? state.visualizationLens : "mapping";
   const lensTabs = [
+    ["mapping", "Segments-Policies Map", mapping.segments.length],
     ["ranges", "Ranges", groups.length],
     ["segments", "Segments", segments.length],
     ["ips", "Live IPs", ips.length],
@@ -450,7 +461,7 @@ function renderRangeInvestigationPage() {
           )
           .join("")}
       </div>
-      ${lens === "segments" ? renderSegmentLens(segments) : lens === "ips" ? renderIpLens(ips) : lens === "policies" ? renderPolicyConflictLens(policyGroups) : renderRangeLens(groups)}
+      ${lens === "mapping" ? renderSegmentPolicyMappingLens(mapping) : lens === "segments" ? renderSegmentLens(segments) : lens === "ips" ? renderIpLens(ips) : lens === "policies" ? renderPolicyConflictLens(policyGroups) : renderRangeLens(groups)}
     </section>
   `;
 }
@@ -489,6 +500,68 @@ function renderRangeLens(groups) {
           ${renderRangeRows(selected)}
         </div>
       </div>
+  `;
+}
+
+function renderSegmentPolicyMappingLens(mapping) {
+  const scopedSegments = scopeMappingSegments(mapping.segments || []);
+  const filteredSegments = filterSegmentPolicyMappingSegments(scopedSegments, mapping);
+  const selectedPolicy = findMappingPolicy(mapping, state.selectedMappingPolicy);
+  const selectedSegment = findMappingSegment(mapping, state.selectedMappingSegment);
+  const view = segmentPolicyMappingView(mapping, filteredSegments, selectedSegment, selectedPolicy);
+  if (!view.segments.length && !view.policies.length) return renderLensNoMatches("mapping", scopedSegments.length);
+  return `
+    <div class="panel-head sub-panel-head">
+      <div>
+        <h2>Main Segments-Policies Mapping Tree</h2>
+        <div class="muted">Whole segment hierarchy mapped to policy references. Red segments have conflicting ranges; green segments have no detected range conflict.</div>
+      </div>
+      ${view.focusLabel ? `<button class="button secondary" type="button" data-clear-mapping-focus>Clear focus</button>` : ""}
+    </div>
+    <div class="mapping-scope-bar">
+      <span class="scope-label">Segments</span>
+      ${[
+        ["all", "All", mapping.summary?.segments || mapping.segments.length],
+        ["conflicting", "Conflicting Segments", mapping.summary?.conflicting_segments || 0],
+        ["clean", "Non-conflicting Segments", mapping.summary?.clean_segments || 0],
+      ]
+        .map(
+          ([key, label, count]) => `
+            <button class="scope-toggle ${state.mappingSegmentScope === key ? "active" : ""}" type="button" data-mapping-scope="${escapeAttr(key)}">
+              ${escapeHtml(label)}
+              <span>${formatNumber(count)}</span>
+            </button>
+          `
+        )
+        .join("")}
+      <span class="scope-separator"></span>
+      <span class="scope-label">Policies</span>
+      <button class="scope-toggle ${state.hideUnmappedMappingPolicies ? "active warning" : ""}" type="button" data-toggle-unmapped-policies>
+        ${state.hideUnmappedMappingPolicies ? "Show policies without segments" : "Hide policies without segments"}
+        <span>${formatNumber(mapping.summary?.policies_without_segments || 0)}</span>
+      </button>
+    </div>
+    <div class="range-investigation-grid mapping-lens-grid">
+      <aside class="range-list">
+        ${renderVisualizationFilter("mapping", "Filter segments or policies", "Search segment, hierarchy, policy, source, or range", mappingFilterOptions(mapping), filteredSegments.length, scopedSegments.length)}
+        <div class="range-list-head">
+          <strong>Segments</strong>
+          <span class="pill">${formatNumber(filteredSegments.length)} of ${formatNumber(scopedSegments.length)}</span>
+        </div>
+        ${filteredSegments.slice(0, 80).map((segment) => mappingSegmentChoice(segment, selectedSegment?.key === segment.key)).join("")}
+        ${filteredSegments.length > 80 ? `<div class="muted list-footnote">${formatNumber(filteredSegments.length - 80)} more segments hidden by the side list. They remain available in the graph and filter.</div>` : ""}
+        <div class="range-list-head">
+          <strong>Policies</strong>
+          <span class="pill">${formatNumber(view.policies.length)}</span>
+        </div>
+        ${view.policies.slice(0, 60).map((policy) => mappingPolicyChoice(policy, selectedPolicy?.policy === policy.policy)).join("")}
+        ${view.policies.length > 60 ? `<div class="muted list-footnote">${formatNumber(view.policies.length - 60)} more policies hidden by the side list. Use the filter to narrow the graph.</div>` : ""}
+      </aside>
+      <div class="range-detail">
+        ${renderSegmentPolicyMappingDiagram(view)}
+        ${renderSegmentPolicyMappingDetails(view)}
+      </div>
+    </div>
   `;
 }
 
@@ -614,9 +687,11 @@ function renderVisualizationFilter(lens, label, placeholder, options, shownCount
 }
 
 function renderLensNoMatches(lens, totalCount) {
-  const labels = { ranges: "ranges", segments: "segments", ips: "live IPs", policies: "policy-backed conflicts" };
+  const labels = { mapping: "segment-policy mappings", ranges: "ranges", segments: "segments", ips: "live IPs", policies: "policy-backed conflicts" };
   const options =
-    lens === "segments"
+    lens === "mapping"
+      ? mappingFilterOptions(segmentPolicyMapping())
+      : lens === "segments"
       ? segmentFilterOptions(segmentGroups())
       : lens === "ips"
         ? ipFilterOptions(ipGroups())
@@ -631,6 +706,416 @@ function renderLensNoMatches(lens, totalCount) {
       <div class="range-detail">
         <div class="empty">No ${escapeHtml(labels[lens] || "items")} match this filter.</div>
       </div>
+    </div>
+  `;
+}
+
+function segmentPolicyMappingView(mapping, filteredSegments, selectedSegment, selectedPolicy) {
+  const fullSegmentsByKey = new Map((mapping.segments || []).map((segment) => [segment.key, segment]));
+  if (selectedPolicy) {
+    const segments = (selectedPolicy.segments || []).map((segment) => fullSegmentsByKey.get(segment.key) || segment).filter(Boolean);
+    return {
+      focusType: "policy",
+      focusLabel: `Policy selected: ${selectedPolicy.policy}`,
+      segments: sortMappingSegments(segments),
+      policies: [selectedPolicy],
+      selectedSegment: null,
+      selectedPolicy,
+    };
+  }
+  if (selectedSegment) {
+    const rootPath = normalizedPathText(selectedSegment.path);
+    const segments = sortMappingSegments(
+      (mapping.segments || []).filter((segment) => segment.key === selectedSegment.key || normalizedPathText(segment.path).startsWith(`${rootPath} /`))
+    );
+    return {
+      focusType: "segment",
+      focusLabel: `Segment selected: ${selectedSegment.name || "Unnamed segment"}`,
+      segments,
+      policies: policiesForMappingSegments(mapping, segments),
+      selectedSegment,
+      selectedPolicy: null,
+    };
+  }
+  const segments = sortMappingSegments(filteredSegments);
+  return {
+    focusType: "",
+    focusLabel: "",
+    segments,
+    policies: policiesForMappingSegments(mapping, segments, { includeUnmapped: state.mappingSegmentScope === "all" && !state.hideUnmappedMappingPolicies }),
+    selectedSegment: null,
+    selectedPolicy: null,
+  };
+}
+
+function scopeMappingSegments(segments) {
+  const scope = state.mappingSegmentScope || "all";
+  if (scope === "conflicting") return segments.filter((segment) => segment.has_conflicts || segment.hasConflicts);
+  if (scope === "clean") return segments.filter((segment) => !(segment.has_conflicts || segment.hasConflicts));
+  return segments;
+}
+
+function filterSegmentPolicyMappingSegments(segments, mapping) {
+  const query = normalizedSearch(state.visualizationFilters.mapping);
+  if (!query) return segments;
+  const policiesBySegment = mappingPoliciesBySegment(mapping);
+  return segments.filter((segment) => normalizedSearch(mappingSegmentSearchText(segment, policiesBySegment.get(segment.key) || [])).includes(query));
+}
+
+function policiesForMappingSegments(mapping, segments, options = {}) {
+  const keys = new Set(segments.map((segment) => segment.key));
+  return (mapping.policies || [])
+    .map((policy) => ({
+      ...policy,
+      segments: (policy.segments || []).filter((segment) => keys.has(segment.key)),
+    }))
+    .filter((policy) => policy.segments.length || (options.includeUnmapped && !Number(policy.segment_count || policy.segments?.length || 0)))
+    .sort((a, b) => sortMappingPolicyRows(a, b));
+}
+
+function mappingPoliciesBySegment(mapping) {
+  const output = new Map();
+  (mapping.policies || []).forEach((policy) => {
+    (policy.segments || []).forEach((segment) => {
+      if (!output.has(segment.key)) output.set(segment.key, []);
+      output.get(segment.key).push(policy);
+    });
+  });
+  return output;
+}
+
+function mappingSegmentSearchText(segment = {}, policies = []) {
+  return [
+    segment.name,
+    segment.path,
+    ...(segment.ranges || []),
+    ...(segment.conflicting_ranges || []),
+    ...(segment.policy_references || []).flatMap((ref) => [ref.policy, ref.source]),
+    ...policies.flatMap((policy) => [policy.policy, policy.folder, ...(policy.sources || [])]),
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function mappingFilterOptions(mapping) {
+  return uniqueSorted([
+    ...(mapping.segments || []).flatMap((segment) => [segment.name, segment.path, ...(segment.ranges || []), ...(segment.conflicting_ranges || [])]),
+    ...(mapping.policies || []).flatMap((policy) => [policy.policy, policy.folder, ...(policy.sources || [])]),
+  ]);
+}
+
+function mappingSegmentChoice(segment, active) {
+  const conflict = segment.has_conflicts || segment.hasConflicts;
+  return `
+    <button class="range-choice mapping-choice ${active ? "active" : ""} ${conflict ? "conflict" : "clean"}" type="button" data-mapping-segment="${escapeAttr(segment.key)}">
+      <strong>${escapeHtml(segment.name || "Unnamed segment")}</strong>
+      <span>${escapeHtml(segment.path || "No hierarchy")}</span>
+      <span>${formatNumber(segment.policy_reference_count || 0)} policies, ${formatNumber(segment.ranges?.length || 0)} ranges</span>
+      <span class="${conflict ? "danger-text" : "good-text"}">${conflict ? `${formatNumber(segment.conflict_range_count || 0)} conflicting ranges` : "No range conflicts"}</span>
+    </button>
+  `;
+}
+
+function mappingPolicyChoice(policy, active) {
+  const palette = mappingPolicyPalette(policy);
+  return `
+    <button class="range-choice mapping-choice policy-${escapeAttr(palette.state)} ${active ? "active" : ""}" type="button" data-mapping-policy="${escapeAttr(policy.policy || "Unnamed policy")}">
+      <strong>${escapeHtml(policy.policy || "Unnamed policy")}</strong>
+      <span>${escapeHtml(policyFolderDisplayLabel(policy))}</span>
+      <span>${escapeHtml(palette.label)}</span>
+    </button>
+  `;
+}
+
+function areMappingSegmentLinksHidden(segmentKey) {
+  return Boolean(segmentKey && state.hiddenMappingSegmentLinks?.[segmentKey]);
+}
+
+function renderSegmentPolicyMappingDiagram(view) {
+  const segments = sortMappingSegments(view.segments || []);
+  const policies = sortMappingPoliciesForDiagram(view.policies || []);
+  const segmentCount = Math.max(1, segments.length);
+  const policyCount = Math.max(1, policies.length);
+  const rowHeight = 72;
+  const width = 2080;
+  const height = Math.max(520, 150 + Math.max(segmentCount, policyCount) * rowHeight);
+  const segmentX = 40;
+  const segmentW = 620;
+  const segmentH = 54;
+  const policyX = 1180;
+  const policyW = 650;
+  const policyH = 58;
+  const policyMaxIndent = 168;
+  const segmentStartY = Math.max(110, Math.round((height - segmentCount * rowHeight) / 2));
+  const policyStartY = Math.max(110, Math.round((height - policyCount * rowHeight) / 2));
+  const segmentPositions = new Map();
+  const policyPositions = new Map();
+  const segmentLayout = segments.map((segment, index) => ({
+    item: segment,
+    index,
+    y: segmentStartY + index * rowHeight,
+    indent: Math.min(160, Math.max(0, Number(segment.depth || 0) * 24)),
+    group: topSegmentGroupLabel(segment),
+  }));
+  const policyLayout = policies.map((policy, index) => ({
+    item: policy,
+    index,
+    y: policyStartY + index * rowHeight,
+    indent: policyFolderIndent(policy, policyMaxIndent),
+    group: policyTopFolderGroupLabel(policy),
+  }));
+
+  const segmentRows = segmentLayout
+    .map(({ item: segment, y, indent }) => {
+      const centerY = y + segmentH / 2;
+      const conflict = Boolean(segment.has_conflicts || segment.hasConflicts);
+      const color = conflict ? "#b42318" : "#15803d";
+      const fill = conflict ? "#fff1f2" : "#f0fdf4";
+      const active = view.selectedSegment?.key === segment.key;
+      const linksHidden = areMappingSegmentLinksHidden(segment.key);
+      segmentPositions.set(segment.key, { x: segmentX + indent + segmentW, y: centerY, color });
+      return `
+        <g class="diagram-node-clickable" data-mapping-segment="${escapeAttr(segment.key)}">
+          <rect x="${segmentX + indent}" y="${y}" width="${segmentW}" height="${segmentH}" rx="12" fill="${fill}" stroke="${active ? "#2563eb" : color}" stroke-width="${active ? 4 : 2}" />
+          <rect x="${segmentX + indent}" y="${y}" width="8" height="${segmentH}" rx="4" fill="${color}" />
+          ${svgFitText(segment.name || "Unnamed segment", segmentX + indent + 22, y + 22, segmentW - 285, { fontSize: 16, minFontSize: 10, weight: 850, fill: "#111827" })}
+          ${svgFitText(segment.path || "No hierarchy", segmentX + indent + 22, y + 43, segmentW - 285, { fontSize: 11, minFontSize: 8, weight: 700, fill: "#64748b" })}
+          ${svgFitText(`${conflict ? "CONFLICTING" : "CLEAN"} - ${formatNumber(segment.policy_reference_count || 0)} policies`, segmentX + indent + segmentW - 74, y + 23, 172, { fontSize: 11, minFontSize: 8, weight: 850, fill: linksHidden ? "#64748b" : color, anchor: "end" })}
+          ${svgFitText(linksHidden ? "links hidden" : `${formatNumber(segment.ranges?.length || 0)} ranges`, segmentX + indent + segmentW - 74, y + 43, 172, { fontSize: 10, minFontSize: 8, weight: 750, fill: linksHidden ? "#b45309" : "#64748b", anchor: "end" })}
+          <g class="diagram-node-clickable" data-toggle-mapping-segment-links="${escapeAttr(segment.key)}">
+            <rect x="${segmentX + indent + segmentW - 56}" y="${y + 14}" width="38" height="27" rx="13.5" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.7" />
+            <text x="${segmentX + indent + segmentW - 37}" y="${y + 34}" text-anchor="middle" font-size="16" font-weight="950" fill="#1e3a8a">${linksHidden ? "+" : "-"}</text>
+          </g>
+        </g>
+      `;
+    })
+    .join("");
+
+  const policyRows = policyLayout
+    .map(({ item: policy, y, indent }) => {
+      const centerY = y + policyH / 2;
+      const active = view.selectedPolicy?.policy === policy.policy;
+      const x = policyX + indent;
+      const palette = mappingPolicyPalette(policy);
+      policyPositions.set(policy.policy, { x, y: centerY });
+      return `
+        <g class="diagram-node-clickable" data-mapping-policy="${escapeAttr(policy.policy || "Unnamed policy")}">
+          <rect x="${x}" y="${y}" width="${policyW}" height="${policyH}" rx="12" fill="${palette.fill}" stroke="${active ? "#1d4ed8" : palette.stroke}" stroke-width="${active ? 4 : 2}" />
+          <rect x="${x}" y="${y}" width="8" height="${policyH}" rx="4" fill="${palette.stroke}" />
+          ${svgFitText(policy.policy || "Unnamed policy", x + 22, y + 24, policyW - 210, { fontSize: 16, minFontSize: 10, weight: 850, fill: "#111827" })}
+          ${svgFitText(policyFolderDisplayLabel(policy), x + 22, y + 45, policyW - 210, { fontSize: 11, minFontSize: 8, weight: 700, fill: "#64748b" })}
+          ${svgFitText(palette.shortLabel, x + policyW - 18, y + 24, 160, { fontSize: 11, minFontSize: 8, weight: 850, fill: palette.stroke, anchor: "end" })}
+          ${svgFitText(`${formatNumber(policy.segments?.length || 0)} segments`, x + policyW - 18, y + 45, 160, { fontSize: 10, minFontSize: 8, weight: 750, fill: "#64748b", anchor: "end" })}
+        </g>
+      `;
+    })
+    .join("");
+
+  const links = policies
+    .flatMap((policy) =>
+      (policy.segments || []).map((segment) => {
+        if (areMappingSegmentLinksHidden(segment.key)) return "";
+        const start = segmentPositions.get(segment.key);
+        const end = policyPositions.get(policy.policy);
+        if (!start || !end) return "";
+        const highlighted = view.selectedSegment?.key === segment.key || view.selectedPolicy?.policy === policy.policy;
+        return `<path d="M ${start.x} ${start.y} C ${start.x + 160} ${start.y}, ${end.x - 160} ${end.y}, ${end.x} ${end.y}" fill="none" stroke="${start.color}" stroke-width="${highlighted ? 3.8 : 1.6}" stroke-linecap="round" opacity="${highlighted ? 0.8 : 0.26}" />`;
+      })
+    )
+    .join("");
+  const segmentQuadrants = renderMappingQuadrants(segmentLayout, {
+    x: segmentX - 18,
+    width: segmentW + 214,
+    rowHeight,
+    nodeHeight: segmentH,
+    fill: "#f8fafc",
+    stroke: "#94a3b8",
+    labelX: segmentX,
+  });
+  const policyQuadrants = renderMappingQuadrants(policyLayout, {
+    x: policyX - 18,
+    width: policyW + policyMaxIndent + 36,
+    rowHeight,
+    nodeHeight: policyH,
+    fill: "#f8fafc",
+    stroke: "#94a3b8",
+    labelX: policyX,
+  });
+
+  return `
+    <div class="range-diagram-card segment-policy-map-card">
+      <div class="diagram-head">
+        <div>
+          <span class="eyebrow">Segments to policies hierarchy map</span>
+          <strong>${escapeHtml(view.focusLabel || "All mapped segments")}</strong>
+        </div>
+        <div class="diagram-actions">
+          <span class="muted">${formatNumber(segments.length)} segments, ${formatNumber(policies.length)} policies</span>
+          <button class="icon-button" type="button" data-download-mapping-png title="Download mapping graph as PNG" aria-label="Download mapping graph as PNG">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3v11m0 0 4-4m-4 4-4-4" />
+              <path d="M5 17v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2" />
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="range-diagram-scroll">
+        <svg class="range-diagram-svg segment-policy-map-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Full segment policy mapping tree">
+          <rect width="${width}" height="${height}" fill="#ffffff" />
+          <text x="${segmentX}" y="42" font-size="18" font-weight="850" fill="#64748b">SEGMENT HIERARCHY</text>
+          <text x="${policyX}" y="42" font-size="18" font-weight="850" fill="#64748b">LINKED POLICIES</text>
+          <text x="${segmentX}" y="72" font-size="13" font-weight="750" fill="#15803d">green = no conflicting ranges</text>
+          <text x="${segmentX + 235}" y="72" font-size="13" font-weight="750" fill="#b42318">red = has conflicting ranges</text>
+          ${segmentQuadrants}
+          ${policyQuadrants}
+          ${links}
+          ${segmentRows || `<text x="${segmentX}" y="${Math.round(height / 2)}" font-size="18" font-weight="800" fill="#64748b">No segments match this view.</text>`}
+          ${policyRows || `<text x="${policyX}" y="${Math.round(height / 2)}" font-size="18" font-weight="800" fill="#64748b">No linked policies for the displayed segments.</text>`}
+        </svg>
+      </div>
+    </div>
+  `;
+}
+
+function sortMappingPoliciesForDiagram(policies) {
+  return [...(policies || [])].sort((a, b) => sortMappingPolicyRows(a, b));
+}
+
+function sortMappingPolicyRows(a, b) {
+  return (
+    policyTopFolderGroupLabel(a).localeCompare(policyTopFolderGroupLabel(b), undefined, { numeric: true, sensitivity: "base" }) ||
+    policyFolderGroupLabel(a).localeCompare(policyFolderGroupLabel(b), undefined, { numeric: true, sensitivity: "base" }) ||
+    mappingPolicySortWeight(a) - mappingPolicySortWeight(b) ||
+    String(a.policy || "").localeCompare(String(b.policy || ""), undefined, { numeric: true, sensitivity: "base" })
+  );
+}
+
+function mappingPolicySortWeight(policy = {}) {
+  const stateName = mappingPolicyPalette(policy).state;
+  if (stateName === "conflicting") return 0;
+  if (stateName === "clean") return 1;
+  return 2;
+}
+
+function topSegmentGroupLabel(segment = {}) {
+  const parts = pathSegments(segment.path || "").filter(Boolean);
+  return parts[1] || parts[0] || "Segments";
+}
+
+function policyFolderGroupLabel(policy = {}) {
+  const parts = pathSegments(policy.folder || "").filter(Boolean);
+  if (parts.length <= 1) return parts[0] || "Policy Folders";
+  return parts.slice(1).join(" / ");
+}
+
+function policyFolderDisplayLabel(policy = {}) {
+  const parts = pathSegments(policy.folder || "").filter(Boolean);
+  if (!parts.length) return "No policy folder";
+  return parts[0] === "Policy Folders" && parts.length > 1 ? parts.slice(1).join(" / ") : parts.join(" / ");
+}
+
+function policyTopFolderGroupLabel(policy = {}) {
+  const parts = pathSegments(policy.folder || "").filter(Boolean);
+  return parts[1] || parts[0] || "Policy Folders";
+}
+
+function policyFolderIndent(policy = {}, maxIndent = 168) {
+  const parts = pathSegments(policy.folder || "").filter(Boolean);
+  const depthBelowTopFolder = Math.max(0, parts.length - 2);
+  return Math.min(maxIndent, depthBelowTopFolder * 28);
+}
+
+function mappingPolicyPalette(policy = {}) {
+  const segmentCount = Number(policy.segment_count ?? policy.segments?.length ?? 0);
+  const conflictingCount = Number(policy.conflicting_segment_count || 0);
+  if (!segmentCount) {
+    return {
+      state: "unmapped",
+      fill: "#fff7ed",
+      stroke: "#ea580c",
+      label: "No segment mapping",
+      shortLabel: "No segments",
+    };
+  }
+  if (conflictingCount) {
+    return {
+      state: "conflicting",
+      fill: "#fff1f2",
+      stroke: "#b42318",
+      label: `${formatNumber(conflictingCount)} overlapping segment${conflictingCount === 1 ? "" : "s"}`,
+      shortLabel: "Overlaps",
+    };
+  }
+  return {
+    state: "clean",
+    fill: "#eff6ff",
+    stroke: "#2563eb",
+    label: `${formatNumber(segmentCount)} mapped segment${segmentCount === 1 ? "" : "s"}`,
+    shortLabel: "Mapped",
+  };
+}
+
+function renderMappingQuadrants(layout, options) {
+  const groups = [];
+  let current = null;
+  layout.forEach((row) => {
+    if (!current || current.label !== row.group) {
+      current = { label: row.group || "Unfiled", startY: row.y, endY: row.y };
+      groups.push(current);
+    }
+    current.endY = row.y;
+  });
+  return groups
+    .map((group) => {
+      const y = Math.max(80, group.startY - 34);
+      const height = group.endY - group.startY + options.nodeHeight + 50;
+      return `
+        <g class="mapping-quadrant">
+          <rect x="${options.x}" y="${y}" width="${options.width}" height="${height}" rx="18" fill="${options.fill}" stroke="${options.stroke}" stroke-width="1.4" stroke-dasharray="4 7" opacity="0.78" />
+          ${svgFitText(group.label, options.labelX, y + 20, options.width - 40, { fontSize: 13, minFontSize: 9, weight: 850, fill: "#64748b" })}
+        </g>
+      `;
+    })
+    .join("");
+}
+
+function renderSegmentPolicyMappingDetails(view) {
+  const focus = view.selectedSegment || view.selectedPolicy;
+  if (!focus) {
+    return `
+      <div class="stage-summary">
+        <strong>Use the map to focus the investigation.</strong>
+        <span>Click a segment to keep its hierarchy branch and mapped policies, or click a policy to show the segments it uses.</span>
+      </div>
+    `;
+  }
+  if (view.selectedSegment) {
+    return `
+      <div class="range-row-list">
+        <h3>Selected segment mapping</h3>
+        <article class="range-row-card ${view.selectedSegment.has_conflicts ? "danger" : "good"}">
+          <h4>${escapeHtml(view.selectedSegment.name || "Unnamed segment")}</h4>
+          <p>${escapeHtml(view.selectedSegment.path || "No hierarchy")}</p>
+          <div class="range-chip-list">
+            <span class="pill ${view.selectedSegment.has_conflicts ? "danger" : "good"}">${view.selectedSegment.has_conflicts ? `${formatNumber(view.selectedSegment.conflict_range_count || 0)} conflicting ranges` : "No conflicting ranges"}</span>
+            <span class="pill">${formatNumber(view.selectedSegment.policy_reference_count || 0)} policy references</span>
+            <span class="pill">${formatNumber(view.selectedSegment.ranges?.length || 0)} configured ranges</span>
+          </div>
+        </article>
+      </div>
+    `;
+  }
+  return `
+    <div class="range-row-list">
+      <h3>Selected policy mapping</h3>
+      <article class="range-row-card selected">
+        <h4>${escapeHtml(view.selectedPolicy.policy || "Unnamed policy")}</h4>
+        <p>${escapeHtml(view.selectedPolicy.folder || "No policy folder")}</p>
+        <div class="range-chip-list">
+          <span class="pill">${formatNumber(view.selectedPolicy.segments?.length || 0)} mapped segments</span>
+          <span class="pill danger">${formatNumber(view.selectedPolicy.conflicting_segment_count || 0)} conflicting segments</span>
+        </div>
+      </article>
     </div>
   `;
 }
@@ -834,9 +1319,30 @@ function policyConflictView(group, groups = rangePolicyGroups()) {
     scopeLabel: "",
     scopeDescription: "",
     segments: group.segments || [],
-    policies: group.policies || [],
+    policies: visiblePoliciesForRange(group),
     ranges: [group],
   };
+}
+
+function visiblePoliciesForRange(group) {
+  return (group.policies || [])
+    .map((policy) => ({
+      ...policy,
+      segments: (policy.segments || []).filter((segment) => !isPolicySegmentCollapsed(segment.key)),
+    }))
+    .filter((policy) => policy.segments.length);
+}
+
+function isPolicySegmentCollapsed(segmentKey) {
+  return Boolean(segmentKey && state.collapsedPolicySegments?.[segmentKey]);
+}
+
+function isPolicyRangeCollapsed(range) {
+  return Boolean(range && state.collapsedPolicyRanges?.[range]);
+}
+
+function arePolicyNonConflictRangesHidden(segmentKey) {
+  return Boolean(segmentKey && state.hiddenPolicyNonConflictRanges?.[segmentKey]);
 }
 
 function findPolicyAcrossGroups(policyName, groups) {
@@ -886,14 +1392,17 @@ function buildPolicySegmentScope(segmentKey, groups) {
   let selectedSegment = null;
   const policiesByName = new Map();
   const ranges = [];
+  const conflictRangeSet = new Set();
 
   groups.forEach((group) => {
     const segment = (group.segments || []).find((item) => item.key === segmentKey);
     if (!segment) return;
     selectedSegment = selectedSegment || segment;
+    conflictRangeSet.add(group.range);
     const policies = (group.policies || []).filter((policy) => (policy.segments || []).some((item) => item.key === segmentKey));
     ranges.push({
       range: group.range,
+      isConflict: true,
       liveHostCount: group.liveHostCount || 0,
       ipCount: group.ipCount || 0,
       stageLabels: group.stageLabels || [],
@@ -920,6 +1429,18 @@ function buildPolicySegmentScope(segmentKey, groups) {
   });
 
   if (!selectedSegment) return null;
+  const additionalRanges = uniqueSorted([...(selectedSegment.allRanges || []), ...(selectedSegment.ranges || [])])
+    .filter((range) => range && !conflictRangeSet.has(range))
+    .map((range) => ({
+      range,
+      isConflict: false,
+      liveHostCount: 0,
+      ipCount: countIps(range),
+      stageLabels: [],
+      categories: [],
+      segment: selectedSegment,
+      policies: [],
+    }));
   const policies = Array.from(policiesByName.values())
     .map((policy) => ({
       policy: policy.policy,
@@ -937,14 +1458,15 @@ function buildPolicySegmentScope(segmentKey, groups) {
     selectedSegment,
     segments: [selectedSegment],
     policies,
-    ranges: ranges.sort((a, b) => b.liveHostCount - a.liveHostCount || a.range.localeCompare(b.range)),
+    ranges: [...ranges, ...additionalRanges].sort((a, b) => Number(b.isConflict) - Number(a.isConflict) || b.liveHostCount - a.liveHostCount || a.range.localeCompare(b.range)),
   };
 }
 
 function renderPolicyConflictVisualization(group, view = policyConflictView(group)) {
+  const conflictRangeCount = view.scopeType === "segment" ? (view.ranges || []).filter((item) => item.isConflict).length : view.ranges.length;
   const summary =
     view.scopeType === "segment"
-      ? `${formatNumber(view.ranges.length)} conflicting range${view.ranges.length === 1 ? "" : "s"} and ${formatNumber(view.policies.length)} consolidated polic${view.policies.length === 1 ? "y" : "ies"} shown for this segment.`
+      ? `${formatNumber(conflictRangeCount)} conflicting range${conflictRangeCount === 1 ? "" : "s"} and ${formatNumber(view.policies.length)} consolidated polic${view.policies.length === 1 ? "y" : "ies"} shown for this segment.`
       : `${formatNumber(view.policies.length)} consolidated polic${view.policies.length === 1 ? "y" : "ies"} shown for this conflict range.`;
   return `
     ${view.scopeType === "segment" ? renderPolicySegmentScopeDiagramSvg(group, view) : renderPolicyConflictDiagramSvg(group, view)}
@@ -957,21 +1479,22 @@ function renderPolicyConflictVisualization(group, view = policyConflictView(grou
 
 function renderPolicySegmentScopeDiagramSvg(group, view) {
   const ranges = view.ranges || [];
+  const conflictRanges = ranges.filter((item) => item.isConflict);
   const policies = view.policies || [];
   const rowHeight = 112;
   const width = 1760;
-  const height = Math.max(480, 150 + Math.max(ranges.length, policies.length) * rowHeight);
+  const height = Math.max(480, 150 + Math.max(conflictRanges.length, policies.length) * rowHeight);
   const rangeX = 48;
   const rangeW = 360;
   const rangeH = 74;
   const segmentX = 615;
-  const segmentW = 420;
+  const segmentW = 460;
   const segmentH = 104;
   const segmentY = Math.round(height / 2 - segmentH / 2);
-  const policyX = 1210;
+  const policyX = 1248;
   const policyW = 500;
   const policyH = 74;
-  const rangeStartY = Math.max(110, Math.round((height - ranges.length * rowHeight) / 2));
+  const rangeStartY = Math.max(110, Math.round((height - conflictRanges.length * rowHeight) / 2));
   const policyStartY = Math.max(110, Math.round((height - policies.length * rowHeight) / 2));
   const segment = view.selectedSegment || view.segments?.[0] || {};
   const segmentColor = segment.used ? "#15803d" : "#b42318";
@@ -980,19 +1503,21 @@ function renderPolicySegmentScopeDiagramSvg(group, view) {
   const segmentRightX = segmentX + segmentW;
   const segmentCenterY = segmentY + segmentH / 2;
 
-  const rangeRows = ranges
+  const rangeRows = conflictRanges
     .map((item, index) => {
       const y = rangeStartY + index * rowHeight;
       const centerY = y + rangeH / 2;
       const active = item.range === group.range;
       const live = Number(item.liveHostCount || 0) > 0;
       const color = live ? "#b42318" : "#2563eb";
+      const fill = live ? "#fff1f2" : "#eff6ff";
+      const meta = `conflict - ${formatNumber(item.liveHostCount || 0)} live hosts - ${formatNumber(item.policies?.length || 0)} policies`;
       return `
         <path d="M ${rangeX + rangeW} ${centerY} C ${rangeX + rangeW + 100} ${centerY}, ${segmentLeftX - 100} ${segmentCenterY}, ${segmentLeftX} ${segmentCenterY}" fill="none" stroke="${color}" stroke-width="${active ? 4 : 2.6}" stroke-linecap="round" opacity="${active ? 0.85 : 0.55}" />
         <g class="diagram-node-clickable" data-policy-scope-range="${escapeAttr(item.range)}">
-          <rect x="${rangeX}" y="${y}" width="${rangeW}" height="${rangeH}" rx="14" fill="${live ? "#fff1f2" : "#eff6ff"}" stroke="${active ? "#2563eb" : color}" stroke-width="${active ? 4 : 2}" />
+          <rect x="${rangeX}" y="${y}" width="${rangeW}" height="${rangeH}" rx="14" fill="${fill}" stroke="${active ? "#2563eb" : color}" stroke-width="${active ? 4 : 2}" />
           ${svgFitText(item.range, rangeX + 20, y + 28, rangeW - 40, { fontSize: 17, minFontSize: 10, weight: 900, fill: "#111827" })}
-          ${svgFitText(`${formatNumber(item.liveHostCount || 0)} live hosts - ${formatNumber(item.policies?.length || 0)} policies`, rangeX + 20, y + 52, rangeW - 40, { fontSize: 12, minFontSize: 9, weight: 800, fill: live ? "#b42318" : "#64748b" })}
+          ${svgFitText(meta, rangeX + 20, y + 52, rangeW - 40, { fontSize: 12, minFontSize: 9, weight: 800, fill: live ? "#b42318" : "#64748b" })}
         </g>
       `;
     })
@@ -1022,7 +1547,7 @@ function renderPolicySegmentScopeDiagramSvg(group, view) {
           <span class="eyebrow">Segment policy conflict diagram</span>
           <strong>${escapeHtml(segment.name || "Unnamed segment")}</strong>
         </div>
-        <span class="muted">${formatNumber(ranges.length)} ranges, ${formatNumber(policies.length)} policies</span>
+        <span class="muted">${formatNumber(conflictRanges.length)} conflict ranges, ${formatNumber(policies.length)} policies</span>
       </div>
       <div class="range-diagram-scroll">
         <svg class="range-diagram-svg policy-diagram-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Segment conflict policy diagram">
@@ -1059,7 +1584,7 @@ function renderPolicyConflictDiagramSvg(group, view = policyConflictView(group))
   const rangeY = Math.round(height / 2 - rangeH / 2);
   const segmentX = 520;
   const segmentW = 410;
-  const segmentH = 76;
+  const segmentH = 92;
   const policyX = 1120;
   const policyW = 570;
   const policyH = 78;
@@ -1075,16 +1600,23 @@ function renderPolicyConflictDiagramSvg(group, view = policyConflictView(group))
       const color = segment.used ? "#15803d" : "#b42318";
       const fill = segment.used ? "#f0fdf4" : "#fff1f2";
       const active = view.scopeSegment === segment.key;
+      const collapsed = isPolicySegmentCollapsed(segment.key);
+      const policyCount = segmentPolicyCount(segment);
       segmentPositions.set(segment.key, { x: segmentX + segmentW, y: centerY, segment });
       return `
         <path d="M ${rangeCenterX} ${rangeCenterY} C ${rangeCenterX + 105} ${rangeCenterY}, ${segmentX - 105} ${centerY}, ${segmentX} ${centerY}" fill="none" stroke="${color}" stroke-width="3" stroke-linecap="round" opacity="0.65" />
         <g class="diagram-node-clickable" data-policy-scope-segment="${escapeAttr(segment.key)}">
-          <rect x="${segmentX}" y="${y}" width="${segmentW}" height="${segmentH}" rx="14" fill="${fill}" stroke="${active ? "#2563eb" : color}" stroke-width="${active ? 4 : 2}" />
+          <rect x="${segmentX}" y="${y}" width="${segmentW}" height="${segmentH}" rx="14" fill="${collapsed ? "#f8fafc" : fill}" stroke="${active ? "#2563eb" : color}" stroke-width="${active ? 4 : 2}" opacity="${collapsed ? 0.82 : 1}" />
           <rect x="${segmentX}" y="${y}" width="9" height="${segmentH}" rx="4" fill="${color}" />
-          ${svgFitText(segment.name || "Unnamed segment", segmentX + 24, y + 27, segmentW - 150, { fontSize: 19, minFontSize: 11, weight: 850, fill: "#111827" })}
-          ${svgFitText(segmentParent(segment.path) || segment.path || "No parent", segmentX + 24, y + 51, segmentW - 160, { fontSize: 13, minFontSize: 9, weight: 750, fill: "#64748b" })}
-          ${svgFitText(segmentUsageLabel(segment), segmentX + segmentW - 20, y + 31, 132, { fontSize: 11, minFontSize: 8, weight: 850, fill: color, anchor: "end" })}
-          ${svgFitText(categoryPillsText(segment), segmentX + segmentW - 20, y + 53, 132, { fontSize: 11, minFontSize: 8, weight: 800, fill: "#64748b", anchor: "end" })}
+          ${svgFitText(segment.name || "Unnamed segment", segmentX + 24, y + 27, segmentW - 156, { fontSize: 19, minFontSize: 11, weight: 850, fill: "#111827" })}
+          ${svgFitText(segmentParent(segment.path) || segment.path || "No parent", segmentX + 24, y + 51, segmentW - 156, { fontSize: 13, minFontSize: 9, weight: 750, fill: "#64748b" })}
+          ${svgFitText(categoryPillsText(segment), segmentX + 24, y + 74, segmentW - 156, { fontSize: 11, minFontSize: 8, weight: 800, fill: "#64748b" })}
+          ${svgFitText(segmentUsageLabel(segment), segmentX + segmentW - 20, y + 27, 132, { fontSize: 11, minFontSize: 8, weight: 850, fill: color, anchor: "end" })}
+          <g class="diagram-node-clickable" data-toggle-policy-segment="${escapeAttr(segment.key)}">
+            <rect x="${segmentX + segmentW - 78}" y="${y + 50}" width="58" height="28" rx="14" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.8" />
+            <text x="${segmentX + segmentW - 49}" y="${y + 70}" text-anchor="middle" font-size="16" font-weight="950" fill="#1e3a8a">${collapsed ? "+" : "-"}</text>
+          </g>
+          ${collapsed ? svgFitText(`${formatNumber(policyCount)} policies hidden`, segmentX + 24, y + segmentH - 9, segmentW - 156, { fontSize: 11, minFontSize: 8, weight: 800, fill: "#64748b" }) : ""}
         </g>
       `;
     })
@@ -1152,6 +1684,7 @@ function renderPolicyConflictDetails(group, view = policyConflictView(group)) {
   return `
     <div class="range-row-list">
       <h3>${escapeHtml(heading)}</h3>
+      ${view.scopeType ? "" : renderPolicySegmentGroups(group)}
       ${
         view.policies.length
           ? view.policies
@@ -1191,28 +1724,87 @@ function renderPolicyConflictDetails(group, view = policyConflictView(group)) {
   `;
 }
 
+function renderPolicySegmentGroups(group) {
+  return `
+    <div class="policy-segment-groups">
+      ${(group.segments || [])
+        .map((segment) => {
+          const collapsed = isPolicySegmentCollapsed(segment.key);
+          const policies = (group.policies || []).filter((policy) => (policy.segments || []).some((item) => item.key === segment.key));
+          return `
+            <article class="policy-segment-group ${segment.used ? "used" : "unused"} ${collapsed ? "collapsed" : ""}">
+              <div class="policy-segment-group-head">
+                <button class="mini-toggle" type="button" data-toggle-policy-segment="${escapeAttr(segment.key || "")}" title="${collapsed ? "Expand segment policies" : "Collapse segment policies"}">${collapsed ? "+" : "-"}</button>
+                <button class="link-button segment-group-title" type="button" data-policy-scope-segment="${escapeAttr(segment.key || "")}">${escapeHtml(segment.name || "Unnamed segment")}</button>
+                <span class="pill ${segment.used ? "good" : "danger"}">${escapeHtml(segmentUsageLabel(segment))}</span>
+                <span class="pill">${formatNumber(policies.length)} polic${policies.length === 1 ? "y" : "ies"} in this range</span>
+              </div>
+              <div class="muted">${escapeHtml(segment.path || "No hierarchy")}</div>
+              ${
+                collapsed
+                  ? `<div class="muted">Policies hidden for this segment.</div>`
+                  : `<div class="policy-ref-list">${policies.length ? policies.map((policy) => `<span>${escapeHtml(policy.policy || "Unnamed policy")} <em>${formatNumber(policy.sources?.length || 0)} sources</em></span>`).join("") : `<span>No policy references recorded.</span>`}</div>`
+              }
+            </article>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
 function renderPolicySegmentScopeDetails(view) {
+  const conflictRanges = (view.ranges || []).filter((item) => item.isConflict);
+  const nonConflictRanges = (view.ranges || []).filter((item) => !item.isConflict);
+  const nonConflictHidden = arePolicyNonConflictRangesHidden(view.scopeSegment);
   return `
     <div class="range-row-list">
       <h3>Conflicting ranges and USED policies for selected segment</h3>
       <div class="segment-visual-grid compact">
-        ${(view.ranges || [])
+        ${conflictRanges
           .map(
-            (item) => `
-              <article class="range-segment-card ${item.range === state.selectedRange ? "selected" : ""}">
+            (item) => {
+              const collapsed = isPolicyRangeCollapsed(item.range);
+              return `
+              <article class="range-segment-card ${item.range === state.selectedRange ? "selected" : ""} ${item.isConflict ? "conflict-range-card" : "nonconflict-range-card"}">
                 <div class="range-row-stage">
                   <button class="pill clickable-range" type="button" data-policy-scope-range="${escapeAttr(item.range)}"><strong>${escapeHtml(item.range)}</strong></button>
+                  <span class="pill danger">conflicting range</span>
                   <span class="pill ${item.liveHostCount ? "danger" : "good"}">${formatNumber(item.liveHostCount || 0)} live hosts</span>
+                  <button class="link-button" type="button" data-toggle-policy-range="${escapeAttr(item.range)}">${collapsed ? "Expand" : "Collapse"}</button>
                   ${(item.stageLabels || []).map((label) => `<span class="pill">${escapeHtml(label)}</span>`).join("")}
                 </div>
-                <div class="muted">${formatNumber(item.ipCount || 0)} IPs in conflicting range</div>
-                <div class="policy-ref-list">
-                  ${(item.policies || []).length ? item.policies.map((policy) => `<span>${escapeHtml(policy.policy || "Unnamed policy")} <em>${formatNumber(policy.sources?.length || 0)} sources</em></span>`).join("") : `<span>No policy references for this range.</span>`}
-                </div>
+                <div class="muted">${formatNumber(item.ipCount || 0)} IPs in ${item.isConflict ? "conflicting" : "configured"} range</div>
+                ${
+                  collapsed
+                    ? `<div class="muted">Range details hidden.</div>`
+                    : `<div class="policy-ref-list">
+                        ${(item.policies || []).length ? item.policies.map((policy) => `<span>${escapeHtml(policy.policy || "Unnamed policy")} <em>${formatNumber(policy.sources?.length || 0)} sources</em></span>`).join("") : `<span>No policy references for this range.</span>`}
+                      </div>`
+                }
               </article>
-            `
+            `;
+            }
           )
           .join("")}
+        ${
+          nonConflictRanges.length
+            ? `<article class="range-segment-card nonconflict-range-card">
+                <div class="range-row-stage">
+                  <button class="mini-toggle" type="button" data-toggle-policy-nonconflict-ranges="${escapeAttr(view.scopeSegment)}">${nonConflictHidden ? "+" : "-"}</button>
+                  <strong>${formatNumber(nonConflictRanges.length)} other non-conflicting range${nonConflictRanges.length === 1 ? "" : "s"}</strong>
+                  <span class="pill">${formatNumber(nonConflictRanges.reduce((sum, item) => sum + Number(item.ipCount || 0), 0))} IPs across ranges</span>
+                  <button class="link-button" type="button" data-toggle-policy-nonconflict-ranges="${escapeAttr(view.scopeSegment)}">${nonConflictHidden ? "Show group" : "Hide group"}</button>
+                </div>
+                <div class="muted">These ranges belong to the selected segment but are not part of the active conflict list.</div>
+                ${
+                  nonConflictHidden
+                    ? `<div class="muted">Non-conflicting ranges hidden.</div>`
+                    : `<div class="range-chip-list">${nonConflictRanges.map((item) => `<span class="pill">${escapeHtml(item.range)} <em>${formatNumber(item.ipCount || 0)} IPs</em></span>`).join("")}</div>`
+                }
+              </article>`
+            : ""
+        }
       </div>
       <h3>Consolidated policies mapped to this segment</h3>
       ${
@@ -1953,8 +2545,68 @@ function wireEvents(root) {
   });
   root.querySelectorAll("[data-viz-lens]").forEach((button) => {
     button.addEventListener("click", () => {
-      state.visualizationLens = button.dataset.vizLens || "ranges";
+      state.visualizationLens = button.dataset.vizLens || "mapping";
       localStorage.setItem("visualizationLens", state.visualizationLens);
+      render();
+    });
+  });
+  root.querySelectorAll("[data-mapping-scope]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.mappingSegmentScope = button.dataset.mappingScope || "all";
+      state.selectedMappingSegment = "";
+      state.selectedMappingPolicy = "";
+      localStorage.setItem("mappingSegmentScope", state.mappingSegmentScope);
+      localStorage.removeItem("selectedMappingSegment");
+      localStorage.removeItem("selectedMappingPolicy");
+      render();
+    });
+  });
+  root.querySelectorAll("[data-toggle-unmapped-policies]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.hideUnmappedMappingPolicies = !state.hideUnmappedMappingPolicies;
+      localStorage.setItem("hideUnmappedMappingPolicies", String(state.hideUnmappedMappingPolicies));
+      if (state.hideUnmappedMappingPolicies) {
+        const selected = findMappingPolicy(segmentPolicyMapping(), state.selectedMappingPolicy);
+        if (selected && !Number(selected.segment_count || selected.segments?.length || 0)) {
+          state.selectedMappingPolicy = "";
+          localStorage.removeItem("selectedMappingPolicy");
+        }
+      }
+      render();
+    });
+  });
+  root.querySelectorAll("[data-mapping-segment]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      state.selectedMappingSegment = button.dataset.mappingSegment || "";
+      state.selectedMappingPolicy = "";
+      localStorage.setItem("selectedMappingSegment", state.selectedMappingSegment);
+      localStorage.removeItem("selectedMappingPolicy");
+      render();
+    });
+  });
+  root.querySelectorAll("[data-toggle-mapping-segment-links]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleMappingSegmentLinks(button.dataset.toggleMappingSegmentLinks || "");
+    });
+  });
+  root.querySelectorAll("[data-mapping-policy]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      state.selectedMappingPolicy = button.dataset.mappingPolicy || "";
+      state.selectedMappingSegment = "";
+      localStorage.setItem("selectedMappingPolicy", state.selectedMappingPolicy);
+      localStorage.removeItem("selectedMappingSegment");
+      render();
+    });
+  });
+  root.querySelectorAll("[data-clear-mapping-focus]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedMappingSegment = "";
+      state.selectedMappingPolicy = "";
+      localStorage.removeItem("selectedMappingSegment");
+      localStorage.removeItem("selectedMappingPolicy");
       render();
     });
   });
@@ -1979,6 +2631,12 @@ function wireEvents(root) {
       render();
     });
   });
+  root.querySelectorAll("[data-toggle-policy-segment]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      togglePolicySegment(button.dataset.togglePolicySegment || "");
+    });
+  });
   root.querySelectorAll("[data-policy-scope-range]").forEach((button) => {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -1989,6 +2647,18 @@ function wireEvents(root) {
       localStorage.removeItem("selectedPolicyConflictSegment");
       localStorage.removeItem("selectedPolicyConflictPolicy");
       render();
+    });
+  });
+  root.querySelectorAll("[data-toggle-policy-range]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      togglePolicyRange(button.dataset.togglePolicyRange || "");
+    });
+  });
+  root.querySelectorAll("[data-toggle-policy-nonconflict-ranges]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      togglePolicyNonConflictRanges(button.dataset.togglePolicyNonconflictRanges || "");
     });
   });
   root.querySelectorAll("[data-policy-scope-policy]").forEach((button) => {
@@ -2030,6 +2700,9 @@ function wireEvents(root) {
   });
   root.querySelectorAll("[data-download-range-png]").forEach((button) => {
     button.addEventListener("click", () => downloadRangePng(button.dataset.downloadRangePng || ""));
+  });
+  root.querySelectorAll("[data-download-mapping-png]").forEach((button) => {
+    button.addEventListener("click", () => downloadMappingPng());
   });
   root.querySelectorAll("[data-segment-select]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -2336,6 +3009,42 @@ function openIpVisualization(ip) {
   });
 }
 
+function togglePolicySegment(segmentKey) {
+  if (!segmentKey) return;
+  state.collapsedPolicySegments = { ...(state.collapsedPolicySegments || {}) };
+  if (state.collapsedPolicySegments[segmentKey]) delete state.collapsedPolicySegments[segmentKey];
+  else state.collapsedPolicySegments[segmentKey] = true;
+  localStorage.setItem("collapsedPolicySegments", JSON.stringify(state.collapsedPolicySegments));
+  render();
+}
+
+function togglePolicyRange(range) {
+  if (!range) return;
+  state.collapsedPolicyRanges = { ...(state.collapsedPolicyRanges || {}) };
+  if (state.collapsedPolicyRanges[range]) delete state.collapsedPolicyRanges[range];
+  else state.collapsedPolicyRanges[range] = true;
+  localStorage.setItem("collapsedPolicyRanges", JSON.stringify(state.collapsedPolicyRanges));
+  render();
+}
+
+function togglePolicyNonConflictRanges(segmentKey) {
+  if (!segmentKey) return;
+  state.hiddenPolicyNonConflictRanges = { ...(state.hiddenPolicyNonConflictRanges || {}) };
+  if (state.hiddenPolicyNonConflictRanges[segmentKey]) delete state.hiddenPolicyNonConflictRanges[segmentKey];
+  else state.hiddenPolicyNonConflictRanges[segmentKey] = true;
+  localStorage.setItem("hiddenPolicyNonConflictRanges", JSON.stringify(state.hiddenPolicyNonConflictRanges));
+  render();
+}
+
+function toggleMappingSegmentLinks(segmentKey) {
+  if (!segmentKey) return;
+  state.hiddenMappingSegmentLinks = { ...(state.hiddenMappingSegmentLinks || {}) };
+  if (state.hiddenMappingSegmentLinks[segmentKey]) delete state.hiddenMappingSegmentLinks[segmentKey];
+  else state.hiddenMappingSegmentLinks[segmentKey] = true;
+  localStorage.setItem("hiddenMappingSegmentLinks", JSON.stringify(state.hiddenMappingSegmentLinks));
+  render();
+}
+
 function resolveRangeGroup(range) {
   const value = String(range || "").trim();
   if (!value) return null;
@@ -2372,15 +3081,25 @@ async function downloadRangePng(range) {
   const svg = document.querySelector("[data-range-diagram]");
   if (!svg) return toast("No range diagram is available to download.");
   const selected = state.selectedRange || range || "range";
-  const source = new XMLSerializer().serializeToString(svg);
-  const blob = new Blob([source], { type: "image/svg+xml;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
+  await downloadSvgAsPng(svg, `${slugify(`range-${selected}`)}.png`, "range diagram");
+}
+
+async function downloadMappingPng() {
+  const svg = document.querySelector(".segment-policy-map-svg");
+  if (!svg) return toast("No mapping graph is available to download.");
+  const focus = state.selectedMappingSegment || state.selectedMappingPolicy || state.mappingSegmentScope || "all";
+  await downloadSvgAsPng(svg, `${slugify(`segments-policies-map-${focus}`)}.png`, "mapping graph");
+}
+
+async function downloadSvgAsPng(svg, filename, label = "diagram") {
+  const source = svgMarkupForExport(svg);
+  const url = svgMarkupDataUrl(source);
   try {
     const image = await loadImage(url);
-    const scale = 2;
     const viewBox = svg.viewBox?.baseVal;
     const width = viewBox?.width || svg.clientWidth || 1400;
     const height = viewBox?.height || svg.clientHeight || 600;
+    const scale = Math.max(1, Math.min(2, 16000 / Math.max(width, height)));
     const canvas = document.createElement("canvas");
     canvas.width = Math.ceil(width * scale);
     canvas.height = Math.ceil(height * scale);
@@ -2391,20 +3110,47 @@ async function downloadRangePng(range) {
     const pngUrl = canvas.toDataURL("image/png");
     const link = document.createElement("a");
     link.href = pngUrl;
-    link.download = `${slugify(`range-${selected}`)}.png`;
+    link.download = filename;
     document.body.appendChild(link);
     link.click();
     link.remove();
   } catch (error) {
-    toast(`Unable to export range diagram: ${error.message}`);
-  } finally {
-    URL.revokeObjectURL(url);
+    toast(`Unable to export ${label}: ${error.message}`);
   }
+}
+
+function svgMarkupForExport(svg) {
+  let source = svg.outerHTML || "";
+  if (!source.includes("xmlns=")) {
+    source = source.replace("<svg", '<svg xmlns="http://www.w3.org/2000/svg"');
+  }
+  return source;
+}
+
+function svgMarkupDataUrl(svgMarkup) {
+  return `data:image/svg+xml;charset=utf-8,${percentEncodeUtf8(svgMarkup)}`;
+}
+
+function percentEncodeUtf8(value) {
+  const bytes = [];
+  for (const char of String(value || "")) {
+    const codePoint = char.codePointAt(0);
+    if (codePoint <= 0x7f) {
+      bytes.push(codePoint);
+    } else if (codePoint <= 0x7ff) {
+      bytes.push(0xc0 | (codePoint >> 6), 0x80 | (codePoint & 0x3f));
+    } else if (codePoint <= 0xffff) {
+      bytes.push(0xe0 | (codePoint >> 12), 0x80 | ((codePoint >> 6) & 0x3f), 0x80 | (codePoint & 0x3f));
+    } else {
+      bytes.push(0xf0 | (codePoint >> 18), 0x80 | ((codePoint >> 12) & 0x3f), 0x80 | ((codePoint >> 6) & 0x3f), 0x80 | (codePoint & 0x3f));
+    }
+  }
+  return bytes.map((byte) => `%${byte.toString(16).padStart(2, "0").toUpperCase()}`).join("");
 }
 
 function loadImage(url) {
   return new Promise((resolve, reject) => {
-    const image = new Image();
+    const image = document.createElement("img");
     image.onload = () => resolve(image);
     image.onerror = () => reject(new Error("The diagram image could not be rendered."));
     image.src = url;
@@ -2438,13 +3184,22 @@ async function clearData() {
 
 function resetLocalWorkspaceState() {
   [
+    "selectedMappingSegment",
+    "selectedMappingPolicy",
+    "mappingSegmentScope",
+    "hideUnmappedMappingPolicies",
     "selectedRange",
     "selectedSegment",
     "selectedIp",
     "selectedPolicyConflictSegment",
     "selectedPolicyConflictPolicy",
+    "collapsedPolicySegments",
+    "collapsedPolicyRanges",
+    "hiddenPolicyNonConflictRanges",
+    "hiddenMappingSegmentLinks",
     "visualizationLens",
     "hostIpSource",
+    "vizFilter:mapping",
     "vizFilter:ranges",
     "vizFilter:segments",
     "vizFilter:ips",
@@ -2453,14 +3208,58 @@ function resetLocalWorkspaceState() {
   state.selectedRange = "";
   state.selectedSegment = "";
   state.selectedIp = "";
+  state.selectedMappingSegment = "";
+  state.selectedMappingPolicy = "";
+  state.mappingSegmentScope = "all";
+  state.hideUnmappedMappingPolicies = false;
   state.selectedPolicyConflictSegment = "";
   state.selectedPolicyConflictPolicy = "";
-  state.visualizationLens = "ranges";
-  state.visualizationFilters = { ranges: "", segments: "", ips: "", policies: "" };
+  state.collapsedPolicySegments = {};
+  state.collapsedPolicyRanges = {};
+  state.hiddenPolicyNonConflictRanges = {};
+  state.hiddenMappingSegmentLinks = {};
+  state.visualizationLens = "mapping";
+  state.visualizationFilters = { mapping: "", ranges: "", segments: "", ips: "", policies: "" };
 }
 
 function stageActions(stageKey, rows) {
   return rows.map((row) => actionForRow(stageKey, row)).filter(Boolean);
+}
+
+function segmentPolicyMapping() {
+  const mapping = state.analysis?.mapping || {};
+  return {
+    summary: mapping.summary || {},
+    segments: (mapping.segments || []).map((segment) => ({
+      ...segment,
+      hasConflicts: Boolean(segment.has_conflicts),
+      policyReferenceCount: Number(segment.policy_reference_count || 0),
+      conflictRangeCount: Number(segment.conflict_range_count || 0),
+    })),
+    policies: mapping.policies || [],
+  };
+}
+
+function findMappingSegment(mapping, segmentKey) {
+  if (!segmentKey) return null;
+  return (mapping.segments || []).find((segment) => segment.key === segmentKey) || null;
+}
+
+function findMappingPolicy(mapping, policyName) {
+  if (!policyName) return null;
+  return (mapping.policies || []).find((policy) => policy.policy === policyName) || null;
+}
+
+function sortMappingSegments(segments) {
+  return [...(segments || [])].sort((a, b) => {
+    const aPath = String(a.path || "");
+    const bPath = String(b.path || "");
+    return aPath.localeCompare(bPath, undefined, { numeric: true, sensitivity: "base" }) || String(a.name || "").localeCompare(String(b.name || ""), undefined, { numeric: true, sensitivity: "base" });
+  });
+}
+
+function normalizedPathText(path) {
+  return String(path || "").trim().replace(/\s*\/\s*/g, " / ");
 }
 
 function rangeGroups() {
@@ -2897,26 +3696,21 @@ async function visualizationsForUpdates(updates) {
 }
 
 async function svgMarkupToPngDataUrl(svgMarkup) {
-  const blob = new Blob([svgMarkup], { type: "image/svg+xml;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  try {
-    const image = await loadImage(url);
-    const parsed = new DOMParser().parseFromString(svgMarkup, "image/svg+xml").documentElement;
-    const viewBox = (parsed.getAttribute("viewBox") || "").split(/\s+/).map(Number);
-    const width = viewBox.length === 4 ? viewBox[2] : image.width || 1400;
-    const height = viewBox.length === 4 ? viewBox[3] : image.height || 700;
-    const scale = 1.6;
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.ceil(width * scale);
-    canvas.height = Math.ceil(height * scale);
-    const context = canvas.getContext("2d");
-    context.fillStyle = "#ffffff";
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.drawImage(image, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL("image/png");
-  } finally {
-    URL.revokeObjectURL(url);
-  }
+  const url = svgMarkupDataUrl(svgMarkup);
+  const image = await loadImage(url);
+  const parsed = new DOMParser().parseFromString(svgMarkup, "image/svg+xml").documentElement;
+  const viewBox = (parsed.getAttribute("viewBox") || "").split(/\s+/).map(Number);
+  const width = viewBox.length === 4 ? viewBox[2] : image.width || 1400;
+  const height = viewBox.length === 4 ? viewBox[3] : image.height || 700;
+  const scale = 1.6;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.ceil(width * scale);
+  canvas.height = Math.ceil(height * scale);
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/png");
 }
 
 async function deleteDocument(documentId) {
@@ -2973,7 +3767,7 @@ function categoryPills(item) {
 
 function categoryPillsText(item) {
   return sortedCategories(item?.categories)
-    .map((category) => `Stage ${category.number}`)
+    .map((category) => category.title || `Rule ${category.number}`)
     .join(", ");
 }
 
@@ -2999,12 +3793,21 @@ function segmentUsageLabel(segment = {}) {
   return `USED (${formatNumber(count)} ${count === 1 ? "policy" : "policies"})`;
 }
 
+function countIps(range = "") {
+  const [start, end] = String(range || "").split("-").map((value) => value.trim());
+  if (!start || !end) return 0;
+  const first = ipToNumber(start);
+  const last = ipToNumber(end);
+  if (!Number.isFinite(first) || !Number.isFinite(last) || last < first) return 0;
+  return last - first + 1;
+}
+
 function sameSegment(left = {}, right = {}) {
   return (left.key && right.key && left.key === right.key) || (left.path && right.path && left.path === right.path && left.name === right.name);
 }
 
 function updateVisualizationFilter(lens, value) {
-  if (!["ranges", "segments", "ips", "policies"].includes(lens)) return;
+  if (!["mapping", "ranges", "segments", "ips", "policies"].includes(lens)) return;
   state.visualizationFilters[lens] = value || "";
   localStorage.setItem(`vizFilter:${lens}`, state.visualizationFilters[lens]);
   render();
@@ -3023,6 +3826,15 @@ function normalizedSearch(value) {
 
 function uniqueSorted(values) {
   return Array.from(new Set((values || []).map((value) => String(value || "").trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+}
+
+function readJsonStorage(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (_) {
+    return fallback;
+  }
 }
 
 function pathSegments(path = "") {
