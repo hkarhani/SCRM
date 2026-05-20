@@ -17,6 +17,13 @@ No MongoDB, nginx, or external database is required.
 ```bash
 git clone https://github.com/hkarhani/SCRM.git
 cd SCRM
+
+# Linux bind-mount permission setup.
+# The container runs as non-root UID 10001 and writes runtime files under ./SCR.
+mkdir -p SCR/uploads SCR/snapshots SCR/Documents
+sudo chown -R 10001:10001 SCR
+sudo chmod -R u+rwX SCR
+
 docker compose up --build -d
 ```
 
@@ -70,6 +77,29 @@ docker run --rm -p 127.0.0.1:8088:8080 -v "$PWD/SCR:/app/SCR" hkarhani/scrm:late
 ```
 
 The container runs as a non-root user.
+
+When using a host-mounted `SCR` folder on Linux, create and assign it to the
+container user before starting the image:
+
+```bash
+mkdir -p SCR/uploads SCR/snapshots SCR/Documents
+sudo chown -R 10001:10001 SCR
+sudo chmod -R u+rwX SCR
+```
+
+If the container repeatedly restarts and logs show:
+
+```text
+PermissionError: [Errno 13] Permission denied: '/app/SCR/uploads'
+```
+
+the host `SCR` folder is not writable by the container's non-root user. Run the
+permission commands above, then restart:
+
+```bash
+docker compose down
+docker compose up -d --build
+```
 
 ## Docker Hub Publishing
 

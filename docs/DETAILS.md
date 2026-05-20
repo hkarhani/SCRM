@@ -30,6 +30,35 @@ The app writes local runtime files under `./SCR`:
 
 `SCR/` is ignored by Git and should not be committed.
 
+### Linux Bind-Mount Permissions
+
+The container intentionally runs as a non-root user with UID `10001`. When
+`./SCR` is mounted from a Linux host into `/app/SCR`, Docker preserves the host
+folder ownership. If that folder is owned by another user, the app cannot create
+runtime subfolders and the container may restart with:
+
+```text
+PermissionError: [Errno 13] Permission denied: '/app/SCR/uploads'
+```
+
+Prepare the host folder before first start:
+
+```bash
+mkdir -p SCR/uploads SCR/snapshots SCR/Documents
+sudo chown -R 10001:10001 SCR
+sudo chmod -R u+rwX SCR
+```
+
+If this issue appears after a failed first start, stop the container, fix the
+folder ownership, and start it again:
+
+```bash
+docker compose down
+sudo chown -R 10001:10001 SCR
+sudo chmod -R u+rwX SCR
+docker compose up -d --build
+```
+
 ## Network Exposure
 
 The default Compose deployment binds the web UI to `127.0.0.1:8088`. This keeps the app reachable only from the machine running the container.
