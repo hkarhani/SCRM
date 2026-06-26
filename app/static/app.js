@@ -2344,7 +2344,7 @@ function renderDocumentsPage() {
                   (doc) => `<tr>
                     <td><strong>${escapeHtml(doc.filename)}</strong><div class="muted">${escapeHtml(doc.project_name || state.status?.project?.name || "Segment Conflict Workspace")} - ${escapeHtml(doc.summary || "Range change recommendations")}</div></td>
                     <td>${escapeHtml(formatDate(doc.created_at))}</td>
-                    <td>${escapeHtml(doc.scope || `${formatNumber(doc.step_count || 0)} steps`)}<div class="muted">${formatNumber(doc.step_count || 0)} steps${doc.stages?.length ? `, ${doc.stages.map(escapeHtml).join(", ")}` : ""}</div></td>
+                    <td>${escapeHtml(doc.scope || `${formatNumber(doc.step_count || doc.report_count || 0)} items`)}<div class="muted">${documentItemSummary(doc)}${doc.stages?.length ? `, ${doc.stages.map(escapeHtml).join(", ")}` : ""}</div></td>
                     <td>${formatBytes(doc.size || 0)}</td>
                     <td class="actions-cell"><div class="document-actions"><a class="button secondary small" href="/api/documents/${encodeURIComponent(doc.id)}">Download</a><button class="button danger small" type="button" data-delete-document="${escapeAttr(doc.id)}">Delete</button></div></td>
                   </tr>`
@@ -2363,7 +2363,9 @@ function renderStage() {
   if (stage.key === "zero_ranges") return renderZeroRanges(stage, rows);
   const actions = stageActions(stage.key, rows);
   const liveEdit = Boolean(state.status?.protection?.live_edit_enabled);
-  const actionText = liveEdit ? "Apply page changes" : "Generate page instructions";
+  const reportOnly = !actions.length && rows.length > 0;
+  const actionText = reportOnly ? "Document conflict list" : liveEdit ? "Apply page changes" : "Generate page instructions";
+  const actionCount = reportOnly ? rows.length : actions.length;
   return `
     <section class="panel">
       <div class="panel-head">
@@ -2371,8 +2373,8 @@ function renderStage() {
           <h2>${stage.number}. ${escapeHtml(stage.title)}</h2>
           <div class="muted">${escapeHtml(stage.description)}</div>
         </div>
-        <button class="button ${liveEdit ? "" : "secondary"}" type="button" data-apply-stage="${stage.key}" ${actions.length ? "" : "disabled"}>
-          ${state.loading === `stage:${stage.key}` ? (liveEdit ? "Applying..." : "Generating...") : `${actionText} (${formatNumber(actions.length)})`}
+        <button class="button ${liveEdit && !reportOnly ? "" : "secondary"}" type="button" data-apply-stage="${stage.key}" ${actionCount ? "" : "disabled"}>
+          ${state.loading === `stage:${stage.key}` ? (liveEdit && !reportOnly ? "Applying..." : "Generating...") : `${actionText} (${formatNumber(actionCount)})`}
         </button>
       </div>
       ${renderStageSummary(stage, rows, actions, liveEdit)}
@@ -2383,6 +2385,14 @@ function renderStage() {
       }
     </section>
   `;
+}
+
+function documentItemSummary(doc) {
+  const steps = Number(doc.step_count || 0);
+  const reports = Number(doc.report_count || 0);
+  if (steps) return `${formatNumber(steps)} step${steps === 1 ? "" : "s"}`;
+  if (reports) return `${formatNumber(reports)} conflict item${reports === 1 ? "" : "s"}`;
+  return "0 items";
 }
 
 function renderStageSummary(stage, rows, actions, liveEdit) {
@@ -3571,13 +3581,67 @@ function decisionValue(stageKey, row) {
 async function applyStage(stageKey) {
   const rows = state.analysis?.stages?.[stageKey] || [];
   const updates = stageActions(stageKey, rows);
-  if (!updates.length) return toast("No selected range updates to apply.");
+  if (!updates.length) {
+    if (rows.length) return generateStageConflictReport(stageKey, rows);
+    return toast("No conflicts are available to document.");
+  }
   const liveEdit = Boolean(state.status?.protection?.live_edit_enabled);
   const requestedMode = liveEdit ? "live_edit" : "read_only";
   if (liveEdit && !(await confirmLiveRangeUpdate(`${formatNumber(updates.length)} range update${updates.length === 1 ? "" : "s"} will be sent through Admin API for this page.`))) return;
   state.loading = `stage:${stageKey}`;
   render();
   await applyUpdates(updates, `${stageTitle(stageKey)} page`, requestedMode);
+}
+
+async function generateStageConflictReport(stageKey, rows) {
+  try {
+    state.loading = `stage:${stageKey}`;
+    render();
+    const result = await apiSend("/conflict-report", {
+      method: "POST",
+      body: JSON.stringify(buildConflictReportPayload(stageKey, rows)),
+    });
+    toast(`Generated conflict inventory document with ${formatNumber(result.report_count || rows.length)} item${(result.report_count || rows.length) === 1 ? "" : "s"}.`);
+    await refreshAll();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    state.loading = "";
+    render();
+  }
+}
+
+function buildConflictReportPayload(stageKey, rows) {
+  return {
+    stage_key: stageKey,
+    stage_title: stageTitle(stageKey),
+    scope: `${stageTitle(stageKey)} conflict inventory`,
+    rows: (rows || []).map(conflictReportRow),
+    visualizations: [],
+  };
+}
+
+function conflictReportRow(row) {
+  return {
+    id: row.id,
+    overlap_range: row.overlap_range,
+    ip_count: row.ip_count || 0,
+    live_host_count: row.live_host_count || 0,
+    live_ips: row.live_ips || [],
+    left: conflictReportSegment(row.left),
+    right: conflictReportSegment(row.right),
+  };
+}
+
+function conflictReportSegment(segment = {}) {
+  return {
+    key: segment.key || "",
+    name: segment.name || "",
+    path: segment.path || "",
+    range: segment.range || "",
+    used: Boolean(segment.used),
+    policy_count: Number(segment.policy_count || 0),
+  };
 }
 
 async function applyRange(range) {

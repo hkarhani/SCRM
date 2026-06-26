@@ -83,6 +83,14 @@ class ApplyRangesPayload(BaseModel):
     requested_mode: str = "read_only"
 
 
+class ConflictReportPayload(BaseModel):
+    stage_key: str
+    stage_title: str = ""
+    scope: str = ""
+    rows: list[dict[str, Any]]
+    visualizations: list[VisualizationPayload] = []
+
+
 class ProtectionPayload(BaseModel):
     live_edit_enabled: bool = False
 
@@ -502,6 +510,22 @@ async def apply_ranges(payload: ApplyRangesPayload) -> dict[str, Any]:
     }
 
 
+@app.post("/api/conflict-report")
+async def conflict_report(payload: ConflictReportPayload) -> dict[str, Any]:
+    if not payload.rows:
+        raise HTTPException(status_code=400, detail="No conflicts were provided for the report.")
+    instructions = build_conflict_report(payload)
+    INSTRUCTIONS_PATH.write_text(json.dumps(instructions, indent=2), encoding="utf-8")
+    document = save_instruction_document(instructions, payload.visualizations)
+    return {
+        "ok": True,
+        "mode": "read_only_report",
+        "report_count": len(instructions.get("report_entries") or []),
+        "instructions": instructions,
+        "document": document,
+    }
+
+
 @app.get("/api/download/scrm-offline-host-ip-collector.py")
 @app.get("/api/download/offline-host-collector.py")
 async def download_offline_host_collector() -> StreamingResponse:
@@ -750,11 +774,117 @@ def build_manual_instructions(updates: list[RangeUpdate], scope: str = "", mode:
     }
 
 
+def build_conflict_report(payload: ConflictReportPayload) -> dict[str, Any]:
+    project = current_project_name()
+    stage_key = payload.stage_key
+    stage_title = payload.stage_title or stage_display_name(stage_key)
+    entries = [conflict_report_entry(stage_key, row, index + 1) for index, row in enumerate(payload.rows or [])]
+    ranges = {entry.get("overlap_range") for entry in entries if entry.get("overlap_range")}
+    segments = {
+        entry.get("left_path") or entry.get("left_name")
+        for entry in entries
+        if entry.get("left_path") or entry.get("left_name")
+    } | {
+        entry.get("right_path") or entry.get("right_name")
+        for entry in entries
+        if entry.get("right_path") or entry.get("right_name")
+    }
+    live_ips = set()
+    for entry in entries:
+        live_ips.update(entry.get("live_ips") or [])
+    return {
+        "generated_at": utc_now(),
+        "project_name": project,
+        "mode": "read_only_report",
+        "scope": payload.scope or f"{stage_title} conflict inventory",
+        "summary": (
+            f"{len(entries)} conflict inventory item{'s' if len(entries) != 1 else ''} documented for {stage_title}; "
+            f"{len(ranges)} unique overlap range{'s' if len(ranges) != 1 else ''}, "
+            f"{len(segments)} segment reference{'s' if len(segments) != 1 else ''}, "
+            f"{len(live_ips)} live IP evidence item{'s' if len(live_ips) != 1 else ''}."
+        ),
+        "steps": [],
+        "report_entries": entries,
+    }
+
+
+def conflict_report_entry(stage_key: str, row: dict[str, Any], index: int) -> dict[str, Any]:
+    left = row.get("left") or {}
+    right = row.get("right") or {}
+    live_ips = [str(ip) for ip in row.get("live_ips") or [] if str(ip).strip()]
+    return {
+        "item": index,
+        "stage": stage_key,
+        "stage_name": stage_display_name(stage_key),
+        "overlap_range": str(row.get("overlap_range") or ""),
+        "ip_count": int(row.get("ip_count") or 0),
+        "live_host_count": int(row.get("live_host_count") or 0),
+        "live_ips": live_ips,
+        "left_name": str(left.get("name") or ""),
+        "left_path": str(left.get("path") or ""),
+        "left_range": str(left.get("range") or ""),
+        "left_used": bool(left.get("used")),
+        "left_policy_count": int(left.get("policy_count") or 0),
+        "right_name": str(right.get("name") or ""),
+        "right_path": str(right.get("path") or ""),
+        "right_range": str(right.get("range") or ""),
+        "right_used": bool(right.get("used")),
+        "right_policy_count": int(right.get("policy_count") or 0),
+        "decision": "Keep as is / no range update selected",
+    }
+
+
 def instructions_to_csv(instructions: dict[str, Any]) -> str:
     from io import StringIO
 
     stream = StringIO()
     writer = csv.writer(stream)
+    report_entries = instructions.get("report_entries") or []
+    if report_entries and not instructions.get("steps"):
+        writer.writerow([
+            "project",
+            "item",
+            "stage",
+            "overlap_range",
+            "ip_count",
+            "live_host_count",
+            "live_ips",
+            "left_segment",
+            "left_path",
+            "left_range",
+            "left_used",
+            "left_policy_count",
+            "right_segment",
+            "right_path",
+            "right_range",
+            "right_used",
+            "right_policy_count",
+            "decision",
+        ])
+        project = instructions.get("project_name") or current_project_name()
+        for row in report_entries:
+            writer.writerow([
+                project,
+                row.get("item", ""),
+                row.get("stage_name") or row.get("stage", ""),
+                row.get("overlap_range", ""),
+                row.get("ip_count", ""),
+                row.get("live_host_count", ""),
+                "; ".join(row.get("live_ips") or []),
+                row.get("left_name", ""),
+                row.get("left_path", ""),
+                row.get("left_range", ""),
+                "yes" if row.get("left_used") else "no",
+                row.get("left_policy_count", ""),
+                row.get("right_name", ""),
+                row.get("right_path", ""),
+                row.get("right_range", ""),
+                "yes" if row.get("right_used") else "no",
+                row.get("right_policy_count", ""),
+                row.get("decision", ""),
+            ])
+        return stream.getvalue()
+
     writer.writerow(["project", "step", "stage", "segment", "path", "source_range", "remove_range", "resulting_ranges", "reason", "instruction"])
     project = instructions.get("project_name") or current_project_name()
     for row in instructions.get("steps") or []:
@@ -922,9 +1052,14 @@ def save_instruction_document(instructions: dict[str, Any], visualizations: list
     timestamp = re.sub(r"[^0-9]", "", generated_at)[:14] or datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     project = normalize_project_name(str(instructions.get("project_name") or current_project_name()))
     steps = instructions.get("steps") or []
-    stage_names = sorted({str(step.get("stage") or "manual") for step in steps})
+    report_entries = instructions.get("report_entries") or []
+    stage_names = sorted(
+        {str(step.get("stage") or "manual") for step in steps}
+        or {str(entry.get("stage") or "report") for entry in report_entries}
+    )
+    document_kind = "conflict-inventory" if report_entries and not steps else "recommendations"
     stage_slug = safe_slug("-".join(stage_names) or "manual-range-changes")
-    base_name = f"{project_filename_slug(project)}-{timestamp}-{stage_slug}-recommendations"
+    base_name = f"{project_filename_slug(project)}-{timestamp}-{stage_slug}-{document_kind}"
     path = unique_document_path(base_name, ".docx")
     csv_path = path.with_suffix(".csv")
     csv_path.write_text(instructions_to_csv(instructions), encoding="utf-8")
@@ -936,6 +1071,7 @@ def save_instruction_document(instructions: dict[str, Any], visualizations: list
         "created_at": generated_at,
         "summary": instructions.get("summary", ""),
         "step_count": len(steps),
+        "report_count": len(report_entries),
         "stages": stage_names,
         "size": path.stat().st_size,
         "scope": instructions.get("scope", ""),
@@ -958,11 +1094,19 @@ def write_instruction_docx(path: Path, instructions: dict[str, Any], visualizati
 
     title = doc.add_paragraph()
     title.style = "Title"
-    title.add_run(f"{project} - Segment Conflict Resolution Recommendations")
+    report_entries = instructions.get("report_entries") or []
+    report_only = bool(report_entries and not instructions.get("steps"))
+    title_suffix = "Segment Conflict Inventory Report" if report_only else "Segment Conflict Resolution Recommendations"
+    title.add_run(f"{project} - {title_suffix}")
 
     subtitle = doc.add_paragraph()
     subtitle.style = "Subtitle"
-    mode_label = "Live changes applied" if instructions.get("mode") == "live_applied" else "Read-only admin instructions"
+    if instructions.get("mode") == "live_applied":
+        mode_label = "Live changes applied"
+    elif instructions.get("mode") == "read_only_report":
+        mode_label = "Read-only conflict inventory"
+    else:
+        mode_label = "Read-only admin instructions"
     subtitle.add_run(f"{mode_label} | Generated {instructions.get('generated_at', utc_now())}")
     add_note(doc, "Project", project)
 
@@ -972,12 +1116,20 @@ def write_instruction_docx(path: Path, instructions: dict[str, Any], visualizati
 
     steps = instructions.get("steps") or []
     stages = sorted({str(step.get("stage") or "manual") for step in steps})
-    add_note(
-        doc,
-        "Decision Summary",
-        f"{len(steps)} range change decision{'s' if len(steps) != 1 else ''} across {len(stages)} workflow stage{'s' if len(stages) != 1 else ''}. "
-        "The API boundary is range updates only: no segment create, rename, move, or delete action is included in this document.",
-    )
+    if report_only:
+        add_note(
+            doc,
+            "Report Summary",
+            f"{len(report_entries)} conflict inventory item{'s' if len(report_entries) != 1 else ''} documented with no selected range changes. "
+            "This document is read-only evidence and does not require Admin API updates.",
+        )
+    else:
+        add_note(
+            doc,
+            "Decision Summary",
+            f"{len(steps)} range change decision{'s' if len(steps) != 1 else ''} across {len(stages)} workflow stage{'s' if len(stages) != 1 else ''}. "
+            "The API boundary is range updates only: no segment create, rename, move, or delete action is included in this document.",
+        )
 
     summary = doc.add_table(rows=1, cols=4)
     summary.style = "Table Grid"
@@ -998,6 +1150,9 @@ def write_instruction_docx(path: Path, instructions: dict[str, Any], visualizati
         doc.add_paragraph("No range change decisions were generated.")
     for step in steps:
         add_resolution_step(doc, step, visualization_by_range.get(str(step.get("remove_range") or "")))
+
+    if report_entries:
+        add_conflict_inventory_section(doc, report_entries)
 
     doc.add_heading("Operator Notes", level=1)
     notes = [
@@ -1076,6 +1231,44 @@ def add_resolution_step(doc: Document, step: dict[str, Any], visualization: dict
             caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
         else:
             doc.add_paragraph("Visualization was unavailable for this resolution.")
+
+
+def add_conflict_inventory_section(doc: Document, entries: list[dict[str, Any]]) -> None:
+    doc.add_heading("Conflict Inventory - Keep As Is", level=1)
+    doc.add_paragraph(
+        "This section documents conflicts where no range update was selected. It is intended for review, ownership discussion, or future phased remediation."
+    )
+    table = doc.add_table(rows=1, cols=7)
+    table.style = "Table Grid"
+    headers = ["#", "Stage", "Overlap range", "Live hosts", "Left segment", "Right segment", "Decision"]
+    for index, header in enumerate(headers):
+        cell = table.rows[0].cells[index]
+        cell.text = header
+        shade_cell(cell, "EAF2FF")
+    for entry in entries:
+        cells = table.add_row().cells
+        cells[0].text = str(entry.get("item") or "")
+        cells[1].text = str(entry.get("stage_name") or entry.get("stage") or "")
+        cells[2].text = str(entry.get("overlap_range") or "")
+        cells[3].text = f"{entry.get('live_host_count', 0)} hosts; {entry.get('ip_count', 0)} IPs in range"
+        cells[4].text = conflict_inventory_segment_text(entry, "left")
+        cells[5].text = conflict_inventory_segment_text(entry, "right")
+        cells[6].text = str(entry.get("decision") or "Keep as is")
+        live_ips = entry.get("live_ips") or []
+        if live_ips:
+            sample = ", ".join(live_ips[:30])
+            if len(live_ips) > 30:
+                sample = f"{sample}, +{len(live_ips) - 30} more"
+            doc.add_paragraph(f"Live IP evidence for {entry.get('overlap_range')}: {sample}")
+
+
+def conflict_inventory_segment_text(entry: dict[str, Any], side: str) -> str:
+    name = str(entry.get(f"{side}_name") or "Unnamed segment")
+    path = str(entry.get(f"{side}_path") or "No hierarchy")
+    source_range = str(entry.get(f"{side}_range") or "No source range")
+    used = "USED" if entry.get(f"{side}_used") else "NOT USED"
+    policy_count = int(entry.get(f"{side}_policy_count") or 0)
+    return f"{name}\n{path}\n{source_range}\n{used} ({policy_count} policies)"
 
 
 def visualizations_by_range(visualizations: list[VisualizationPayload]) -> dict[str, dict[str, Any]]:
