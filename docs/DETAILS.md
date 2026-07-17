@@ -113,6 +113,12 @@ python3 scrm_offline_host_ip_collector.py --url https://platform.example.local -
 
 The script prompts for the password securely at runtime.
 
+Alternatively, admins can upload an exported hosts CSV instead of running the
+collector script. If the CSV contains an `IPv4 Address` column, SCRM imports
+only that column as host IP evidence and ignores the other exported fields.
+This supports privacy-sensitive exports where all columns except the endpoint
+IPv4 address are removed before sharing.
+
 ## Workspace Bundles
 
 The UI can save and restore a project workspace as a zip bundle. The bundle includes loaded artifacts, snapshots, generated documents, and sanitized API metadata.

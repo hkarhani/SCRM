@@ -39,6 +39,7 @@ const state = {
   recentApplied: [],
   loading: "",
   showArtifactDetails: false,
+  configSourceTab: localStorage.getItem("configSourceTab") || "mcp",
   hostIpSource: localStorage.getItem("hostIpSource") || "web",
   apiStatus: {},
 };
@@ -46,7 +47,6 @@ const state = {
 document.addEventListener("DOMContentLoaded", init);
 
 async function init() {
-  document.getElementById("refreshBtn").addEventListener("click", refreshAll);
   await refreshAll();
 }
 
@@ -64,6 +64,7 @@ async function refreshAll() {
 
 function render() {
   renderTopbarKpis();
+  renderTopbarActions();
   const app = document.getElementById("app");
   app.innerHTML = `
     ${renderSetup()}
@@ -71,7 +72,7 @@ function render() {
     ${renderPageNav()}
     ${renderActivePage()}
   `;
-  wireEvents(app);
+  wireEvents(document);
 }
 
 function renderTopbarKpis() {
@@ -85,12 +86,43 @@ function renderTopbarKpis() {
   `;
 }
 
+function icon(name) {
+  const paths = {
+    check: '<path d="M20 6 9 17l-5-5"/>',
+    refresh: '<path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>',
+    save: '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/>',
+    trash: '<path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>',
+    upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/>',
+  };
+  return `<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${paths[name] || ""}</svg>`;
+}
+
+function renderTopbarActions() {
+  const element = document.getElementById("topbarActions");
+  if (!element) return;
+  const project = state.status?.project || {};
+  element.innerHTML = `
+    <div class="topbar-project-control">
+      <label for="projectNameInput">Project</label>
+      <input id="projectNameInput" type="text" data-project-name value="${escapeAttr(project.name || "Segment Conflict Workspace")}" />
+      <button class="icon-button" type="button" data-save-project title="Update project name" aria-label="Update project name">${icon("check")}</button>
+    </div>
+    <button class="icon-button" type="button" data-save-workspace title="Save workspace bundle" aria-label="Save workspace bundle">${icon("save")}</button>
+    <label class="icon-button file-button" title="Upload workspace bundle" aria-label="Upload workspace bundle">
+      ${icon("upload")}
+      <input type="file" data-import-workspace accept=".zip,application/zip" />
+    </label>
+    <button class="icon-button danger-icon" type="button" data-clear-data title="Clear loaded data points" aria-label="Clear loaded data points">${icon("trash")}</button>
+    <button class="icon-button" type="button" data-refresh title="Refresh workspace" aria-label="Refresh workspace">${icon("refresh")}</button>
+  `;
+}
+
 function renderSetup() {
   const artifacts = state.status?.artifacts || {};
   const web = state.status?.config?.web || {};
   const admin = state.status?.config?.admin || {};
+  const mcp = state.status?.config?.mcp || {};
   const protection = state.status?.protection || {};
-  const project = state.status?.project || {};
   const artifactItems = [
     { key: "policies", label: "Policies XML", meta: artifacts.policies, required: true },
     { key: "segments", label: "Segments XML", meta: artifacts.segments, required: true },
@@ -111,34 +143,27 @@ function renderSetup() {
           ${artifactItems.map((item) => artifactPill(item.label, item.meta, item.required)).join("")}
           <span class="mode-badge ${protection.live_edit_enabled ? "live" : "readonly"}">${escapeHtml(modeLabel)}</span>
         </div>
-        <div class="project-control">
-          <label for="projectNameInput">Project</label>
-          <input id="projectNameInput" type="text" data-project-name value="${escapeAttr(project.name || "Segment Conflict Workspace")}" />
-          <button class="button secondary small" type="button" data-save-project>Update</button>
-        </div>
         <div class="artifact-actions">
-          <button class="button secondary small" type="button" data-save-workspace>Save</button>
-          <label class="button secondary small file-button">
-            Upload
-            <input type="file" data-import-workspace accept=".zip,application/zip" />
-          </label>
           <button class="button secondary small" type="button" data-toggle-artifacts>
             ${state.showArtifactDetails ? "Hide details" : "Show details"}
           </button>
-          <button class="button danger small" type="button" data-clear-data>Clear loaded data</button>
         </div>
       </div>
       ${
         state.showArtifactDetails
           ? `<div class="artifact-details">
-              ${renderOperationsStrip(protection)}
-              <div class="artifact-input-grid">
-                ${renderXmlInputsColumn(artifacts)}
-                <div class="api-input-stack">
-                  ${state.hostIpSource === "offline" ? uploadCard("hosts", "Offline host IP collection", artifacts.hosts, ".json,.csv,.txt,text/plain,application/json,text/csv", false) : apiCard("web", "Web API host IPs", web)}
-                  ${apiCard("admin", "Admin API segments", admin)}
+              <div class="config-source-head">
+                <div>
+                  <span class="eyebrow">Configuration source</span>
+                  <strong>${state.configSourceTab === "mcp" ? "Remote MCP" : "Manual uploads and direct APIs"}</strong>
+                  <span>${state.configSourceTab === "mcp" ? "Preferred path: collect policies, segments, host IPs, and live segments through a remote HTTPS MCP endpoint." : "Fallback path: upload XML files and optionally collect host IPs or live segments directly."}</span>
+                </div>
+                <div class="config-tabs" role="tablist" aria-label="Configuration source">
+                  <button class="config-tab ${state.configSourceTab === "mcp" ? "active" : ""}" type="button" data-config-tab="mcp">MCP only</button>
+                  <button class="config-tab ${state.configSourceTab === "manual" ? "active" : ""}" type="button" data-config-tab="manual">Manual fallback</button>
                 </div>
               </div>
+              ${state.configSourceTab === "mcp" ? renderMcpOnlyConfig(mcp) : renderManualConfig(artifacts, web, admin, protection)}
             </div>`
           : ""
       }
@@ -182,6 +207,61 @@ function renderOperationsStrip(protection = {}) {
           <button class="mode-button ${state.hostIpSource === "web" ? "active" : ""}" type="button" data-host-source="web">WEB API</button>
           <button class="mode-button ${state.hostIpSource === "offline" ? "active" : ""}" type="button" data-host-source="offline">OFFLINE IMPORT</button>
         </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderMcpOnlyConfig(mcp = {}) {
+  return `
+    <div class="mcp-only-layout">
+      ${mcpCard(mcp)}
+    </div>
+  `;
+}
+
+function renderManualConfig(artifacts = {}, web = {}, admin = {}, protection = {}) {
+  return `
+    <div class="manual-config-layout">
+      <div class="manual-config-toolbar">
+        ${renderProtectionMini(protection)}
+        ${renderHostSourceMini()}
+      </div>
+      <div class="manual-config-grid">
+        ${renderXmlInputsColumn(artifacts)}
+        ${state.hostIpSource === "offline" ? uploadCard("hosts", "Offline host IP collection", artifacts.hosts, ".json,.csv,.txt,text/plain,application/json,text/csv", false) : apiCard("web", "Web API host IPs", web)}
+        ${apiCard("admin", "Admin API segments", admin)}
+      </div>
+    </div>
+  `;
+}
+
+function renderProtectionMini(protection = {}) {
+  const liveEdit = Boolean(protection.live_edit_enabled);
+  return `
+    <div class="mini-control ${liveEdit ? "live" : "readonly"}">
+      <div>
+        <span class="eyebrow">Protection</span>
+        <strong>${liveEdit ? "Live changes allowed" : "Read-only mode"}</strong>
+      </div>
+      <div class="protection-toggle" role="group" aria-label="Protection mode">
+        <button class="mode-button ${!liveEdit ? "active" : ""}" type="button" data-live-edit="false">READ ONLY</button>
+        <button class="mode-button danger ${liveEdit ? "active" : ""}" type="button" data-live-edit="true">LIVE EDITING</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderHostSourceMini() {
+  return `
+    <div class="mini-control">
+      <div>
+        <span class="eyebrow">Host evidence</span>
+        <strong>${state.hostIpSource === "offline" ? "Offline import" : "Live Web API"}</strong>
+      </div>
+      <div class="protection-toggle" role="group" aria-label="Host IP evidence source">
+        <button class="mode-button ${state.hostIpSource === "web" ? "active" : ""}" type="button" data-host-source="web">WEB API</button>
+        <button class="mode-button ${state.hostIpSource === "offline" ? "active" : ""}" type="button" data-host-source="offline">OFFLINE</button>
       </div>
     </div>
   `;
@@ -287,13 +367,20 @@ function renderInstructionOutput() {
 function uploadCard(kind, title, meta = {}, accept = ".xml,text/xml", required = true) {
   const ready = Boolean(meta.exists);
   const status = ready ? "Loaded" : required ? "Required" : "Optional";
+  const hostHelp = kind === "hosts"
+    ? `<div class="offline-host-options">
+        <div><strong>Option 1:</strong> download and run the collector script, then upload the generated JSON.</div>
+        <div><strong>Option 2:</strong> upload an exported hosts CSV that contains an <code>IPv4 Address</code> column. Only that column is imported.</div>
+      </div>`
+    : "";
   return `
     <div class="card upload-card ${ready ? "good" : "warn"}">
       <div class="card-title-row">
         <h3>${escapeHtml(title)}</h3>
         <span class="pill ${ready ? "good" : required ? "warn" : ""}">${status}</span>
       </div>
-      <div class="muted">${ready ? `${formatBytes(meta.size)} uploaded` : kind === "hosts" ? "Import collector output or a CSV/list of host IPs" : "Upload an XML export"}</div>
+      <div class="muted">${ready ? `${formatBytes(meta.size)} uploaded` : kind === "hosts" ? "Import host IP evidence from collector output or an exported hosts CSV" : "Upload an XML export"}</div>
+      ${hostHelp}
       <input type="file" data-upload="${kind}" accept="${escapeAttr(accept)}" />
       ${kind === "hosts" ? `<a class="button secondary small" href="/api/download/scrm-offline-host-ip-collector.py">Download collector script</a>` : ""}
     </div>
@@ -328,6 +415,36 @@ function apiCard(kind, title, cfg = {}) {
         }
       </div>
       <div class="api-inline-status ${apiStatus?.type || ""}" data-api-status="${kind}" ${apiStatus ? "" : "hidden"}>
+        ${apiStatus ? escapeHtml(apiStatus.message) : ""}
+      </div>
+    </div>
+  `;
+}
+
+function mcpCard(cfg = {}) {
+  const ready = Boolean(cfg.base_url && cfg.password_saved);
+  const tokenText = cfg.password_saved ? "********" : "Bearer token";
+  const apiStatus = state.apiStatus.mcp;
+  return `
+    <div class="card api-card mcp-card ${ready ? "good" : "warn"}">
+      <div class="card-title-row">
+        <h3>Remote MCP source</h3>
+        <span class="pill ${ready ? "good" : "warn"}">${ready ? "Configured" : "Optional source"}</span>
+      </div>
+      <div class="api-form-grid mcp-form-grid">
+        <label>HTTPS MCP URL<input type="text" value="${escapeAttr(cfg.base_url || "")}" data-mcp-url placeholder="https://mcp.example.com/mcp" autocomplete="off" autocapitalize="off" spellcheck="false" /></label>
+        <label>Token<input type="password" value="" data-mcp-token placeholder="${escapeAttr(tokenText)}" autocomplete="new-password" data-lpignore="true" data-1p-ignore="true" spellcheck="false" /></label>
+        <label class="tls-inline">
+          <span>Verify TLS</span>
+          <input type="checkbox" data-mcp-tls ${cfg.verify_tls ? "checked" : ""} />
+        </label>
+      </div>
+      <div class="range-chip-list">
+        <button class="button secondary small" data-test-config="mcp" type="button">Test</button>
+        <button class="button small" data-collect-mcp type="button">Collect inputs from MCP</button>
+      </div>
+      <div class="muted compact-note">Imports policies XML, segments XML, host IP evidence, and live segments when those MCP tools are available.</div>
+      <div class="api-inline-status ${apiStatus?.type || ""}" data-api-status="mcp" ${apiStatus ? "" : "hidden"}>
         ${apiStatus ? escapeHtml(apiStatus.message) : ""}
       </div>
     </div>
@@ -2517,9 +2634,17 @@ function renderZeroRanges(stage, rows) {
 }
 
 function wireEvents(root) {
+  root.querySelectorAll("[data-refresh]").forEach((button) => button.addEventListener("click", refreshAll));
   root.querySelectorAll("[data-toggle-artifacts]").forEach((button) => {
     button.addEventListener("click", () => {
       state.showArtifactDetails = !state.showArtifactDetails;
+      render();
+    });
+  });
+  root.querySelectorAll("[data-config-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.configSourceTab = button.dataset.configTab || "mcp";
+      localStorage.setItem("configSourceTab", state.configSourceTab);
       render();
     });
   });
@@ -2734,6 +2859,7 @@ function wireEvents(root) {
   root.querySelectorAll("[data-save-workspace]").forEach((button) => button.addEventListener("click", () => saveWorkspace(button)));
   root.querySelectorAll("[data-upload]").forEach((input) => input.addEventListener("change", () => upload(input)));
   root.querySelectorAll("[data-test-config]").forEach((button) => button.addEventListener("click", () => testConfig(button.dataset.testConfig, button)));
+  root.querySelectorAll("[data-collect-mcp]").forEach((button) => button.addEventListener("click", () => collectFromMcp(button)));
   root.querySelectorAll("[data-collect-hosts]").forEach((button) => button.addEventListener("click", () => collectHosts(button)));
   root.querySelectorAll("[data-collect-admin]").forEach((button) => button.addEventListener("click", () => collectAdminSegments(button)));
   root.querySelectorAll("[data-decision]").forEach((input) =>
@@ -2854,6 +2980,15 @@ function downloadBlob(blob, filename) {
 }
 
 function configPayload(kind) {
+  if (kind === "mcp") {
+    return {
+      base_url: document.querySelector("[data-mcp-url]")?.value || "",
+      username: "",
+      password: "",
+      token: document.querySelector("[data-mcp-token]")?.value || "",
+      verify_tls: document.querySelector("[data-mcp-tls]")?.checked || false,
+    };
+  }
   return {
     base_url: document.querySelector(`[data-${kind}-url]`)?.value || "",
     username: document.querySelector(`[data-${kind}-user]`)?.value || "",
@@ -2869,18 +3004,53 @@ async function testConfig(kind, button) {
     setApiStatus(kind, "error", validation);
     return toast(validation);
   }
-  setApiStatus(kind, "info", `Testing ${kind === "web" ? "Web API" : "Admin API"} connection...`);
+  const label = apiKindLabel(kind);
+  setApiStatus(kind, "info", `Testing ${label} connection...`);
   try {
     await withButtonLoading(button, "Testing...", async () => {
       const result = await apiSend(`/test/${kind}`, { method: "POST", body: JSON.stringify(payload) });
       await persistConfig(kind, payload);
-      setApiStatus(kind, "success", `Test ok: ${result.base_url}`);
-      toast(`${kind} API test ok: ${result.base_url}`);
+      const mcpDetail = kind === "mcp" ? `, ${formatNumber(result.available?.length || 0)} expected tools available${result.missing?.length ? `, ${formatNumber(result.missing.length)} missing` : ""}` : "";
+      setApiStatus(kind, "success", `Test ok: ${result.base_url}${mcpDetail}`);
+      toast(`${label} test ok: ${result.base_url}`);
       await refreshAll();
     });
   } catch (error) {
     setApiStatus(kind, "error", error.message);
-    toast(`${kind} API test failed: ${error.message}`);
+    toast(`${label} test failed: ${error.message}`);
+  }
+}
+
+async function collectFromMcp(button) {
+  const payload = {
+    ...configPayload("mcp"),
+    collect_policies: true,
+    collect_segments: true,
+    collect_hosts: true,
+    collect_live_segments: true,
+    refresh: false,
+  };
+  const validation = validateApiPayload("mcp", payload);
+  if (validation) {
+    setApiStatus("mcp", "error", validation);
+    return toast(validation);
+  }
+  setApiStatus("mcp", "info", "Collecting SCRM inputs from remote MCP...");
+  try {
+    await withButtonLoading(button, "Collecting...", async () => {
+      const result = await apiSend("/collect/mcp", { method: "POST", body: JSON.stringify(payload) });
+      await persistConfig("mcp", payload);
+      const imported = result.imported || [];
+      const skipped = result.skipped || [];
+      const importedText = imported.length ? imported.map((item) => item.artifact).join(", ") : "none";
+      const skippedText = skipped.length ? `; skipped ${skipped.map((item) => item.artifact).join(", ")}` : "";
+      setApiStatus("mcp", skipped.length ? "info" : "success", `Imported ${importedText}${skippedText}.`);
+      toast(`MCP imported ${importedText}${skippedText}.`);
+      await refreshAll();
+    });
+  } catch (error) {
+    setApiStatus("mcp", "error", error.message);
+    toast(`Remote MCP collection failed: ${error.message}`);
   }
 }
 
@@ -2934,14 +3104,26 @@ async function persistConfig(kind, payload) {
 
 function validateApiPayload(kind, payload) {
   const saved = state.status?.config?.[kind] || {};
-  if (!payload.base_url.trim()) return `${kind === "web" ? "Web API" : "Admin API"} URL is required.`;
-  if (!payload.username.trim()) return `${kind === "web" ? "Web API" : "Admin API"} username is required.`;
-  if (!payload.password && !saved.password_saved) return `${kind === "web" ? "Web API" : "Admin API"} password is required.`;
+  const label = apiKindLabel(kind);
+  if (!payload.base_url.trim()) return `${label} URL is required.`;
+  if (kind !== "mcp" && !payload.username.trim()) return `${label} username is required.`;
+  if (kind === "mcp") {
+    if (!payload.token && !payload.password && !saved.password_saved) return "Remote MCP bearer token is required.";
+    return "";
+  }
+  if (!payload.password && !saved.password_saved) return `${label} password is required.`;
   return "";
 }
 
+function apiKindLabel(kind) {
+  if (kind === "web") return "Web API";
+  if (kind === "admin") return "Admin API";
+  if (kind === "mcp") return "Remote MCP";
+  return kind;
+}
+
 async function withButtonLoading(button, label, work) {
-  const previous = button?.textContent || "";
+  const previous = button?.innerHTML || "";
   if (button) {
     button.disabled = true;
     button.textContent = label;
@@ -2951,7 +3133,7 @@ async function withButtonLoading(button, label, work) {
   } finally {
     if (button) {
       button.disabled = false;
-      button.textContent = previous;
+      button.innerHTML = previous;
     }
   }
 }

@@ -62,7 +62,7 @@ rm -rf SCR
 
 1. Upload `Policies.xml`.
 2. Upload `Segments.xml`.
-3. Optionally collect host IPs from Web API or import offline host IP evidence.
+3. Optionally collect host IPs from Web API, import offline collector output, or upload a hosts CSV with an `IPv4 Address` column.
 4. Optionally collect live segments from Admin API.
 5. Keep read-only mode for generated instructions, or explicitly enable live editing before Admin API range updates.
 

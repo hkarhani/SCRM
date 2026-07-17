@@ -55,9 +55,18 @@ app = FastAPI(title="Segment Conflict Resolution Management", version="0.1.0")
 
 class ApiConfigPayload(BaseModel):
     base_url: str
-    username: str
+    username: str = ""
     password: str = ""
+    token: str = ""
     verify_tls: bool = False
+
+
+class McpCollectPayload(ApiConfigPayload):
+    collect_policies: bool = True
+    collect_segments: bool = True
+    collect_hosts: bool = True
+    collect_live_segments: bool = True
+    refresh: bool = False
 
 
 class RangeUpdate(BaseModel):
@@ -118,6 +127,96 @@ class ConnectionConfig:
 
 class PlatformApiError(RuntimeError):
     pass
+
+
+class RemoteMcpClient:
+    def __init__(self, config: ConnectionConfig):
+        self.config = config
+        self.base_url = config.normalized_base_url()
+        self._ssl_context = None if config.verify_tls else ssl._create_unverified_context()
+        self._next_id = 1
+        self._initialized = False
+        self._session_id = ""
+
+    def test(self) -> dict[str, Any]:
+        tools = self.tools_list()
+        names = [str(tool.get("name") or "") for tool in tools if isinstance(tool, dict)]
+        required = {"policies_xml_get", "segments_xml_get", "hosts_list_ips", "segments_get"}
+        return {
+            "ok": True,
+            "base_url": self.base_url,
+            "tools": names,
+            "available": sorted(required.intersection(names)),
+            "missing": sorted(required.difference(names)),
+        }
+
+    def tools_list(self) -> list[dict[str, Any]]:
+        result = self._rpc("tools/list", {})
+        tools = result.get("tools") if isinstance(result, dict) else []
+        return tools if isinstance(tools, list) else []
+
+    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
+        result = self._rpc("tools/call", {"name": name, "arguments": arguments or {}})
+        if isinstance(result, dict) and result.get("isError"):
+            raise PlatformApiError(f"MCP tool {name} returned an error: {mcp_content_text(result) or result}")
+        return mcp_content_payload(result)
+
+    def _rpc(self, method: str, params: dict[str, Any] | None = None) -> Any:
+        if method not in {"initialize", "notifications/initialized"}:
+            self._ensure_initialized()
+        request_id = self._next_id
+        self._next_id += 1
+        body: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+        if method != "notifications/initialized":
+            body["id"] = request_id
+        if params is not None:
+            body["params"] = params
+        response = self._post_json(body, method)
+        if method == "notifications/initialized":
+            return {}
+        if not isinstance(response, dict):
+            raise PlatformApiError(f"MCP {method} returned an invalid response.")
+        if response.get("error"):
+            raise PlatformApiError(f"MCP {method} failed: {response['error']}")
+        return response.get("result", {})
+
+    def _ensure_initialized(self) -> None:
+        if self._initialized:
+            return
+        params = {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "scrm", "version": app.version},
+        }
+        self._rpc("initialize", params)
+        try:
+            self._rpc("notifications/initialized", {})
+        except PlatformApiError:
+            pass
+        self._initialized = True
+
+    def _post_json(self, body: dict[str, Any], label: str) -> dict[str, Any]:
+        data = json.dumps(body).encode("utf-8")
+        headers = {
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        }
+        if self.config.password:
+            headers["Authorization"] = f"Bearer {self.config.password}"
+        if self._session_id:
+            headers["Mcp-Session-Id"] = self._session_id
+        request = urllib.request.Request(self.base_url, data=data, headers=headers, method="POST")
+        raw, response_headers = _open_url_with_headers(
+            request,
+            label,
+            "Remote MCP",
+            self.config.timeout_seconds,
+            self._ssl_context,
+        )
+        session_id = response_headers.get("Mcp-Session-Id") or response_headers.get("mcp-session-id")
+        if session_id:
+            self._session_id = session_id
+        return parse_mcp_http_response(raw)
 
 
 class WebApiClient:
@@ -314,6 +413,7 @@ async def get_state() -> dict[str, Any]:
         "config": {
             "web": masked_config(config.get("web", {})),
             "admin": masked_config(config.get("admin", {})),
+            "mcp": masked_config(config.get("mcp", {})),
         },
         "protection": {
             "live_edit_enabled": bool(config.get("live_edit_enabled", False)),
@@ -359,11 +459,11 @@ async def upload_artifact(artifact_type: str, file: UploadFile = File(...)) -> d
 
 @app.post("/api/config/{kind}")
 async def save_config(kind: str, payload: ApiConfigPayload) -> dict[str, Any]:
-    if kind not in {"web", "admin"}:
-        raise HTTPException(status_code=400, detail="Config kind must be web or admin.")
+    if kind not in {"web", "admin", "mcp"}:
+        raise HTTPException(status_code=400, detail="Config kind must be web, admin, or mcp.")
     config = read_config()
     previous = config.get(kind, {})
-    password = payload.password or reveal_password(previous.get("password", ""))
+    password = payload.password or payload.token or reveal_password(previous.get("password", ""))
     config[kind] = {
         "base_url": payload.base_url.strip(),
         "username": payload.username.strip(),
@@ -390,12 +490,29 @@ async def save_protection(payload: ProtectionPayload) -> dict[str, Any]:
 
 @app.post("/api/test/{kind}")
 async def test_config(kind: str, payload: ApiConfigPayload) -> dict[str, Any]:
+    if kind not in {"web", "admin", "mcp"}:
+        raise HTTPException(status_code=400, detail="Config kind must be web, admin, or mcp.")
     config = connection_from_payload_or_saved(kind, payload)
     try:
-        result = WebApiClient(config).test() if kind == "web" else AdminApiClient(config).test()
+        if kind == "web":
+            result = WebApiClient(config).test()
+        elif kind == "admin":
+            result = AdminApiClient(config).test()
+        else:
+            result = RemoteMcpClient(config).test()
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return result
+
+
+@app.post("/api/collect/mcp")
+async def collect_from_mcp(payload: McpCollectPayload) -> dict[str, Any]:
+    config = connection_from_payload_or_saved("mcp", payload)
+    try:
+        result = import_from_mcp(RemoteMcpClient(config), payload)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"ok": True, **result}
 
 
 @app.post("/api/collect/hosts")
@@ -422,6 +539,77 @@ async def collect_admin_segments(payload: ApiConfigPayload | None = None) -> dic
     snapshot = {"collected_at": utc_now(), "count": len(rows), "raw": raw, "segments": rows}
     ADMIN_SEGMENTS_PATH.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
     return {"ok": True, "count": len(rows), "collected_at": snapshot["collected_at"]}
+
+
+def import_from_mcp(client: RemoteMcpClient, payload: McpCollectPayload) -> dict[str, Any]:
+    imported: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+
+    def record_skip(artifact: str, exc: Exception) -> None:
+        skipped.append({"artifact": artifact, "reason": str(exc)})
+
+    if payload.collect_policies:
+        try:
+            policies_payload = client.call_tool("policies_xml_get", {"max_raw_chars": 0})
+            policies_xml = extract_raw_xml(policies_payload)
+            if not policies_xml:
+                raise PlatformApiError("policies_xml_get did not return raw XML.")
+            parsed = parse_policies_xml(policies_xml.encode("utf-8"))
+            POLICIES_PATH.write_text(policies_xml, encoding="utf-8")
+            (UPLOAD_DIR / "policies.json").write_text(json.dumps(parsed, indent=2), encoding="utf-8")
+            imported.append({"artifact": "policies", **parsed.get("summary", {})})
+        except Exception as exc:
+            record_skip("policies", exc)
+
+    if payload.collect_segments:
+        try:
+            segments_payload = client.call_tool("segments_xml_get", {"max_raw_chars": 0})
+            segments_xml = extract_raw_xml(segments_payload)
+            if not segments_xml:
+                raise PlatformApiError("segments_xml_get did not return raw XML.")
+            parsed = parse_segments_xml(segments_xml.encode("utf-8"))
+            SEGMENTS_PATH.write_text(segments_xml, encoding="utf-8")
+            (UPLOAD_DIR / "segments.json").write_text(json.dumps(parsed, indent=2), encoding="utf-8")
+            imported.append({"artifact": "segments_xml", **parsed.get("summary", {})})
+        except Exception as exc:
+            record_skip("segments_xml", exc)
+
+    if payload.collect_hosts:
+        try:
+            hosts_payload = client.call_tool(
+                "hosts_list_ips",
+                {"q": "", "limit": 0, "refresh": bool(payload.refresh), "field_filter": ""},
+            )
+            rows = normalize_hosts(hosts_payload if isinstance(hosts_payload, dict) else {"hosts": hosts_payload})
+            snapshot = {"collected_at": utc_now(), "count": len(rows), "hosts": rows, "source": "remote_mcp"}
+            HOSTS_PATH.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+            imported.append({"artifact": "hosts", "hosts": len(rows)})
+        except Exception as exc:
+            record_skip("hosts", exc)
+
+    if payload.collect_live_segments:
+        try:
+            live_payload = client.call_tool("segments_get", {"refresh": bool(payload.refresh)})
+            raw = live_payload.get("raw") if isinstance(live_payload, dict) else None
+            source = raw if raw is not None else live_payload
+            rows = normalize_admin_segments(source if isinstance(source, (dict, list)) else {"segments": []})
+            if not rows and isinstance(live_payload, dict) and isinstance(live_payload.get("segments"), list):
+                rows = normalize_admin_segments(live_payload["segments"])
+            snapshot = {
+                "collected_at": utc_now(),
+                "count": len(rows),
+                "raw": raw if raw is not None else live_payload,
+                "segments": rows,
+                "source": "remote_mcp",
+            }
+            ADMIN_SEGMENTS_PATH.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+            imported.append({"artifact": "live_segments", "segments": len(rows)})
+        except Exception as exc:
+            record_skip("live_segments", exc)
+
+    if not imported and skipped:
+        raise PlatformApiError("Remote MCP collection did not import any artifacts: " + "; ".join(f"{item['artifact']}: {item['reason']}" for item in skipped))
+    return {"imported": imported, "skipped": skipped, "collected_at": utc_now()}
 
 
 @app.get("/api/analysis")
@@ -989,7 +1177,7 @@ def sanitized_workspace_config() -> dict[str, Any]:
         "project_name": current_project_name(config),
         "project_updated_at": config.get("project_updated_at", ""),
     }
-    for kind in ("web", "admin"):
+    for kind in ("web", "admin", "mcp"):
         row = config.get(kind) or {}
         if row.get("base_url") or row.get("username"):
             sanitized[kind] = {
@@ -1017,7 +1205,7 @@ def sanitized_config_from_archive(archive: zipfile.ZipFile) -> dict[str, Any]:
     restored: dict[str, Any] = {}
     restored["project_name"] = normalize_project_name(str(source.get("project_name") or DEFAULT_PROJECT_NAME))
     restored["project_updated_at"] = str(source.get("project_updated_at") or utc_now())
-    for kind in ("web", "admin"):
+    for kind in ("web", "admin", "mcp"):
         row = source.get(kind) or {}
         if row.get("base_url") or row.get("username"):
             restored[kind] = {
@@ -1803,7 +1991,7 @@ def normalize_hosts(payload: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def parse_host_ip_file(content: bytes) -> list[dict[str, str]]:
-    text = content.decode("utf-8", errors="replace")
+    text = content.decode("utf-8-sig", errors="replace")
     try:
         payload = json.loads(text)
         if isinstance(payload, dict):
@@ -1833,12 +2021,20 @@ def parse_host_ip_file(content: bytes) -> list[dict[str, str]]:
 
         reader = csv.DictReader(StringIO(text))
         if reader.fieldnames:
+            ipv4_column = find_ipv4_address_column(reader.fieldnames)
             for row in reader:
-                candidates = [row.get(key, "") for key in ("ip", "IPAddress", "ipAddress", "ipv4", "IPv4")]
-                candidates.extend(str(value) for value in row.values())
+                if ipv4_column:
+                    candidates = [row.get(ipv4_column, "")]
+                else:
+                    candidates = [row.get(key, "") for key in ("ip", "IPAddress", "ipAddress", "ipv4", "IPv4")]
+                    candidates.extend(str(value) for value in row.values())
                 for candidate in candidates:
                     before = len(rows)
-                    add_ip(candidate, str(row.get("id", row.get("hostId", ""))), str(row.get("mac", "")))
+                    add_ip(
+                        candidate,
+                        str(row.get("id", row.get("hostId", row.get("Host", "")))),
+                        str(row.get("mac", row.get("MAC Address", ""))),
+                    )
                     if len(rows) > before:
                         break
     except Exception:
@@ -1852,6 +2048,14 @@ def parse_host_ip_file(content: bytes) -> list[dict[str, str]]:
     if not rows:
         raise HTTPException(status_code=400, detail="No valid IPv4 host IPs were found in the uploaded host snapshot.")
     return rows
+
+
+def find_ipv4_address_column(fieldnames: list[str]) -> str:
+    normalized = {re.sub(r"[^a-z0-9]", "", str(name).casefold()): name for name in fieldnames}
+    for key in ("ipv4address", "ipv4addr"):
+        if key in normalized:
+            return normalized[key]
+    return ""
 
 
 def offline_host_collector_script() -> str:
@@ -2137,7 +2341,10 @@ def write_config(config: dict[str, Any]) -> None:
 def saved_connection(kind: str) -> ConnectionConfig:
     saved = read_config().get(kind, {})
     password = reveal_password(saved.get("password", ""))
-    if not saved.get("base_url") or not saved.get("username") or not password:
+    if kind == "mcp":
+        if not saved.get("base_url") or not password:
+            raise HTTPException(status_code=400, detail="MCP configuration is incomplete.")
+    elif not saved.get("base_url") or not saved.get("username") or not password:
         raise HTTPException(status_code=400, detail=f"{kind} API configuration is incomplete.")
     return ConnectionConfig(
         base_url=saved["base_url"],
@@ -2148,12 +2355,12 @@ def saved_connection(kind: str) -> ConnectionConfig:
 
 
 def connection_from_payload_or_saved(kind: str, payload: ApiConfigPayload | None) -> ConnectionConfig:
-    if payload and (payload.base_url or payload.username or payload.password):
+    if payload and (payload.base_url or payload.username or payload.password or payload.token):
         saved = read_config().get(kind, {})
         return ConnectionConfig(
             base_url=payload.base_url or saved.get("base_url", ""),
             username=payload.username or saved.get("username", ""),
-            password=payload.password or reveal_password(saved.get("password", "")),
+            password=payload.password or payload.token or reveal_password(saved.get("password", "")),
             verify_tls=bool(payload.verify_tls),
         )
     return saved_connection(kind)
@@ -2201,11 +2408,22 @@ def file_meta(path: Path) -> dict[str, Any]:
 
 
 def _open_url(request: urllib.request.Request, label: str, api_name: str, timeout: int, context: ssl.SSLContext | None) -> bytes:
+    raw, _headers = _open_url_with_headers(request, label, api_name, timeout, context)
+    return raw
+
+
+def _open_url_with_headers(
+    request: urllib.request.Request,
+    label: str,
+    api_name: str,
+    timeout: int,
+    context: ssl.SSLContext | None,
+) -> tuple[bytes, dict[str, str]]:
     last_error: Exception | None = None
     for attempt in range(1, 3):
         try:
             with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
-                return response.read()
+                return response.read(), dict(response.headers.items())
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise PlatformApiError(f"{api_name} {label} failed with HTTP {exc.code}: {detail or exc.reason}") from exc
@@ -2219,6 +2437,93 @@ def _open_url(request: urllib.request.Request, label: str, api_name: str, timeou
                 raise PlatformApiError(f"{api_name} request timed out.") from exc
         time.sleep(0.5 * attempt)
     raise PlatformApiError(f"{api_name} request failed: {last_error}")
+
+
+def parse_mcp_http_response(raw: bytes) -> dict[str, Any]:
+    text = raw.decode("utf-8", errors="replace").strip()
+    if not text:
+        return {}
+    try:
+        payload = json.loads(text)
+        return payload if isinstance(payload, dict) else {"result": payload}
+    except json.JSONDecodeError:
+        pass
+    last_payload: dict[str, Any] | None = None
+    for line in text.splitlines():
+        clean = line.strip()
+        if not clean.startswith("data:"):
+            continue
+        data = clean[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            payload = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            last_payload = payload
+            if "result" in payload or "error" in payload:
+                return payload
+    if last_payload is not None:
+        return last_payload
+    raise PlatformApiError("Remote MCP returned content that was neither JSON nor MCP event-stream JSON.")
+
+
+def mcp_content_payload(result: Any) -> Any:
+    if not isinstance(result, dict):
+        return result
+    if "structuredContent" in result:
+        return result["structuredContent"]
+    content = result.get("content")
+    if not isinstance(content, list):
+        return result
+    texts = []
+    for item in content:
+        if isinstance(item, dict) and item.get("type") == "text":
+            texts.append(str(item.get("text") or ""))
+    text = "\n".join(part for part in texts if part).strip()
+    if not text:
+        return result
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
+def mcp_content_text(result: Any) -> str:
+    payload = mcp_content_payload(result)
+    if isinstance(payload, str):
+        return payload
+    try:
+        return json.dumps(payload, sort_keys=True)
+    except TypeError:
+        return str(payload)
+
+
+def extract_raw_xml(payload: Any) -> str:
+    if isinstance(payload, str):
+        text = payload.strip()
+        if text.startswith("<"):
+            return text
+        try:
+            return extract_raw_xml(json.loads(text))
+        except json.JSONDecodeError:
+            return ""
+    if isinstance(payload, dict):
+        for key in ("raw_xml", "xml", "content", "text"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip().startswith("<"):
+                return value.strip()
+        for value in payload.values():
+            found = extract_raw_xml(value)
+            if found:
+                return found
+    if isinstance(payload, list):
+        for item in payload:
+            found = extract_raw_xml(item)
+            if found:
+                return found
+    return ""
 
 
 def _token_from_response(raw: bytes) -> str:
