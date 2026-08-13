@@ -1228,11 +1228,47 @@ input[type="file"]::file-selector-button {
   display: grid;
   grid-template-columns: auto minmax(260px, 1fr) minmax(260px, 1fr) minmax(120px, 0.35fr);
   gap: 10px;
-  align-items: start;
+  align-items: end;
 }
 
 .segment-reference-toggle {
+  display: inline-flex;
+  min-height: 40px;
   min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: #fff;
+}
+
+.segment-reference-toggle button {
+  min-height: 40px;
+  min-width: 0;
+  flex: 1 1 0;
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  padding: 0 12px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.segment-reference-toggle button:last-child {
+  border-right: 0;
+}
+
+.segment-reference-toggle button:hover {
+  background: #f8fafc;
+  color: var(--text);
+}
+
+.segment-reference-toggle button.active {
+  background: var(--blue-soft);
+  color: #1e3a8a;
+  box-shadow: inset 0 0 0 1px #bfdbfe;
 }
 
 .segment-reference-limit {
