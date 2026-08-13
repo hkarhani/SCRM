@@ -1201,6 +1201,104 @@ input[type="file"]::file-selector-button {
   color: #1e3a8a;
 }
 
+.segment-reference-panel {
+  display: grid;
+  border-bottom: 1px solid #dbe3ee;
+  background: #fff;
+}
+
+.segment-reference-head {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(360px, 0.95fr);
+  gap: 14px;
+  padding: 16px;
+}
+
+.segment-reference-title {
+  display: grid;
+  align-content: center;
+  gap: 4px;
+}
+
+.segment-reference-title h2 {
+  margin: 0;
+}
+
+.segment-reference-controls {
+  display: grid;
+  grid-template-columns: auto minmax(260px, 1fr) minmax(260px, 1fr) minmax(120px, 0.35fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.segment-reference-toggle {
+  min-width: 0;
+}
+
+.segment-reference-limit {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.segment-reference-limit input {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text);
+  padding: 7px 10px;
+  font-size: 16px;
+  font-weight: 850;
+}
+
+.segment-reference-kpis {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(160px, 1fr));
+  gap: 10px;
+  padding: 0 16px 14px;
+}
+
+.segment-reference-kpis > div {
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #f8fafc;
+  padding: 10px 12px;
+}
+
+.segment-reference-kpis span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.segment-reference-kpis strong {
+  color: var(--ink);
+  font-size: 30px;
+  line-height: 1;
+}
+
+.segment-reference-graph {
+  overflow: auto;
+  border-top: 1px solid #dbe3ee;
+  background: #fff;
+}
+
+.segment-reference-svg {
+  display: block;
+  min-width: 980px;
+  width: 100%;
+  height: auto;
+}
+
 .mapping-scope-bar {
   display: flex;
   flex-wrap: wrap;
@@ -1607,6 +1705,20 @@ input[type="file"]::file-selector-button {
 
 .segment-policy-map-svg {
   min-width: 1320px;
+}
+
+@media (max-width: 1100px) {
+  .segment-reference-head {
+    grid-template-columns: 1fr;
+  }
+
+  .segment-reference-controls {
+    grid-template-columns: auto 1fr;
+  }
+
+  .segment-reference-kpis {
+    grid-template-columns: 1fr;
+  }
 }
 
 .range-visual {

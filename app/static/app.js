@@ -15,6 +15,9 @@ const state = {
   activePage: localStorage.getItem("activePage") || "workflow",
   activeStage: "used_wins",
   visualizationLens: localStorage.getItem("visualizationLens") || "mapping",
+  segmentReferenceMetric: localStorage.getItem("segmentReferenceMetric") || "live_hosts",
+  segmentReferenceFilter: localStorage.getItem("segmentReferenceFilter") || "all",
+  segmentReferenceLimit: Number(localStorage.getItem("segmentReferenceLimit") || 7),
   selectedRange: localStorage.getItem("selectedRange") || "",
   selectedSegment: localStorage.getItem("selectedSegment") || "",
   selectedIp: localStorage.getItem("selectedIp") || "",
@@ -566,6 +569,7 @@ function renderRangeInvestigationPage() {
           <div class="muted">Investigate overlap decisions by range, by segment, or by live endpoint IP. Category labels map to workflow stages 1-4 only.</div>
         </div>
       </div>
+      ${renderSegmentReferenceOverview(mapping)}
       <div class="visualization-toolbar">
         ${lensTabs
           .map(
@@ -580,6 +584,158 @@ function renderRangeInvestigationPage() {
       </div>
       ${lens === "mapping" ? renderSegmentPolicyMappingLens(mapping) : lens === "segments" ? renderSegmentLens(segments) : lens === "ips" ? renderIpLens(ips) : lens === "policies" ? renderPolicyConflictLens(policyGroups) : renderRangeLens(groups)}
     </section>
+  `;
+}
+
+function renderSegmentReferenceOverview(mapping) {
+  const overview = segmentReferenceOverview(mapping);
+  const metric = state.segmentReferenceMetric || "live_hosts";
+  const filter = state.segmentReferenceFilter || "all";
+  const limit = clampNumber(Number(state.segmentReferenceLimit || 7), 1, 50);
+  const metricLabel = segmentReferenceMetricLabel(metric);
+  const totalReferences = overview.shown.reduce((total, segment) => total + Number(segment.policyCount || 0), 0);
+  const liveHosts = overview.shown.reduce((total, segment) => total + Number(segment.liveHostCount || 0), 0);
+  return `
+    <section class="segment-reference-panel">
+      <div class="segment-reference-head">
+        <div class="segment-reference-title">
+          <h2>Segment Policy References</h2>
+          <div class="muted">Bubble size is based on ${escapeHtml(metricLabel.toLowerCase())}. Each bubble keeps both configuration usage and live host counts visible.</div>
+        </div>
+        <div class="segment-reference-controls">
+          <button class="icon-button" type="button" data-download-segment-reference-png title="Download segment reference graph as PNG" aria-label="Download segment reference graph as PNG">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3v11m0 0 4-4m-4 4-4-4" />
+              <path d="M5 17v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2" />
+            </svg>
+          </button>
+          <div class="segmented-control segment-reference-toggle" aria-label="Segment bubble metric">
+            ${[
+              ["configured_policies", "Configured policies"],
+              ["live_hosts", "Live hosts"],
+              ["ip_count", "IP ranges"],
+            ]
+              .map(
+                ([key, label]) => `
+                  <button class="${metric === key ? "active" : ""}" type="button" data-segment-reference-metric="${escapeAttr(key)}">${escapeHtml(label)}</button>
+                `
+              )
+              .join("")}
+          </div>
+          <div class="segmented-control segment-reference-toggle" aria-label="Segment configuration filter">
+            ${[
+              ["all", "All"],
+              ["configured", "Configured"],
+              ["not_configured", "Not configured"],
+            ]
+              .map(
+                ([key, label]) => `
+                  <button class="${filter === key ? "active" : ""}" type="button" data-segment-reference-filter="${escapeAttr(key)}">${escapeHtml(label)}</button>
+                `
+              )
+              .join("")}
+          </div>
+          <label class="segment-reference-limit">
+            <span>Show segments</span>
+            <input type="number" min="1" max="50" step="1" value="${escapeAttr(limit)}" data-segment-reference-limit />
+          </label>
+        </div>
+      </div>
+      <div class="segment-reference-kpis">
+        <div>
+          <span>Shown / matching</span>
+          <strong>${formatNumber(overview.shown.length)}/${formatNumber(overview.matching.length)}</strong>
+        </div>
+        <div>
+          <span>Total segment references</span>
+          <strong>${formatNumber(totalReferences)}</strong>
+        </div>
+        <div>
+          <span>Live segment hosts</span>
+          <strong>${formatNumber(liveHosts)}</strong>
+        </div>
+      </div>
+      <div class="segment-reference-graph">
+        ${overview.shown.length ? renderSegmentReferenceSvg(overview.shown, metric) : `<div class="empty">No segments match this overview filter.</div>`}
+      </div>
+    </section>
+  `;
+}
+
+function segmentReferenceOverview(mapping) {
+  const metric = state.segmentReferenceMetric || "live_hosts";
+  const filter = state.segmentReferenceFilter || "all";
+  const limit = clampNumber(Number(state.segmentReferenceLimit || 7), 1, 50);
+  const rows = (mapping.segments || []).map((segment) => {
+    const policyCount = Number(segment.policyReferenceCount ?? segment.policy_reference_count ?? 0);
+    const liveHostCount = Number(segment.live_host_count ?? segment.liveHostCount ?? 0);
+    const ipCount = Number(segment.ip_count ?? segment.ipCount ?? sumIpCapacity(segment.ranges || []));
+    return {
+      key: segment.key || `${segment.path || ""}/${segment.name || ""}`,
+      name: segment.name || "Unnamed segment",
+      path: segment.path || "No hierarchy",
+      policyCount,
+      liveHostCount,
+      ipCount,
+      configured: policyCount > 0,
+      conflict: Boolean(segment.hasConflicts || segment.has_conflicts),
+      metricValue: metric === "configured_policies" ? policyCount : metric === "ip_count" ? ipCount : liveHostCount,
+    };
+  });
+  const matching = rows
+    .filter((segment) => filter === "configured" ? segment.configured : filter === "not_configured" ? !segment.configured : true)
+    .sort((a, b) => Number(b.metricValue) - Number(a.metricValue) || Number(b.policyCount) - Number(a.policyCount) || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+  return { matching, shown: matching.slice(0, limit) };
+}
+
+function renderSegmentReferenceSvg(rows, metric) {
+  const columns = Math.min(5, Math.max(1, rows.length));
+  const cellW = 315;
+  const cellH = 335;
+  const marginX = 54;
+  const marginY = 38;
+  const width = Math.max(880, marginX * 2 + columns * cellW);
+  const height = marginY * 2 + Math.ceil(rows.length / columns) * cellH;
+  const maxValue = Math.max(1, ...rows.map((row) => Number(row.metricValue || 0)));
+  const nodes = rows
+    .map((segment, index) => {
+      const row = Math.floor(index / columns);
+      const col = index % columns;
+      const x = marginX + col * cellW + cellW / 2;
+      const y = marginY + row * cellH + 145;
+      const radius = Math.round(74 + Math.sqrt(Number(segment.metricValue || 0) / maxValue) * 80);
+      const color = segment.configured ? "#15803d" : "#b42318";
+      const fill = segment.configured ? "#ecfdf3" : "#fff1f2";
+      const mainValue = metric === "ip_count" ? compactNumber(segment.ipCount) : formatNumber(segment.metricValue || 0);
+      const detailLines = [
+        `${formatNumber(segment.policyCount)} config ${segment.policyCount === 1 ? "policy" : "policies"}`,
+        `${formatNumber(segment.liveHostCount)} live ${segment.liveHostCount === 1 ? "host" : "hosts"}`,
+        `${compactNumber(segment.ipCount)} IPs in ranges`,
+      ];
+      const pathLines = wrapSvgText(segment.path, 30, 2);
+      return `
+        <g class="diagram-node-clickable" data-open-segment="${escapeAttr(segment.key)}">
+          <circle cx="${x}" cy="${y}" r="${radius}" fill="${fill}" stroke="${color}" stroke-width="2" opacity="0.95" />
+          <circle cx="${x}" cy="${y}" r="${Math.max(22, radius - 16)}" fill="url(#segmentReferenceGlow)" opacity="0.35" />
+          ${svgTextLines(wrapSvgText(segment.name, 18, 2), x, y - 62, { anchor: "middle", fontSize: 17, weight: 900, fill: color, lineHeight: 20 })}
+          <text x="${x}" y="${y + 12}" text-anchor="middle" font-size="${mainValue.length > 8 ? 29 : 39}" font-weight="950" fill="${color}">${escapeHtml(mainValue)}</text>
+          ${svgTextLines(detailLines, x, y + 43, { anchor: "middle", fontSize: 13, weight: 820, fill: "#475569", lineHeight: 17 })}
+          ${svgTextLines(pathLines, x, y + radius + 36, { anchor: "middle", fontSize: 13, weight: 760, fill: "#64748b", lineHeight: 17 })}
+        </g>
+      `;
+    })
+    .join("");
+  return `
+    <svg class="segment-reference-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Segment policy references and live endpoint usage">
+      <defs>
+        <radialGradient id="segmentReferenceGlow" cx="50%" cy="35%" r="70%">
+          <stop offset="0%" stop-color="#ffffff" stop-opacity="1" />
+          <stop offset="100%" stop-color="#dbeafe" stop-opacity="0.35" />
+        </radialGradient>
+      </defs>
+      <rect width="${width}" height="${height}" fill="#ffffff" />
+      ${nodes}
+    </svg>
   `;
 }
 
@@ -2839,6 +2995,30 @@ function wireEvents(root) {
   root.querySelectorAll("[data-download-mapping-png]").forEach((button) => {
     button.addEventListener("click", () => downloadMappingPng());
   });
+  root.querySelectorAll("[data-download-segment-reference-png]").forEach((button) => {
+    button.addEventListener("click", () => downloadSegmentReferencePng());
+  });
+  root.querySelectorAll("[data-segment-reference-metric]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.segmentReferenceMetric = button.dataset.segmentReferenceMetric || "live_hosts";
+      localStorage.setItem("segmentReferenceMetric", state.segmentReferenceMetric);
+      render();
+    });
+  });
+  root.querySelectorAll("[data-segment-reference-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.segmentReferenceFilter = button.dataset.segmentReferenceFilter || "all";
+      localStorage.setItem("segmentReferenceFilter", state.segmentReferenceFilter);
+      render();
+    });
+  });
+  root.querySelectorAll("[data-segment-reference-limit]").forEach((input) => {
+    input.addEventListener("change", () => {
+      state.segmentReferenceLimit = clampNumber(Number(input.value || 7), 1, 50);
+      localStorage.setItem("segmentReferenceLimit", String(state.segmentReferenceLimit));
+      render();
+    });
+  });
   root.querySelectorAll("[data-segment-select]").forEach((button) => {
     button.addEventListener("click", () => {
       openSegmentVisualization(button.dataset.segmentSelect || "");
@@ -3283,6 +3463,13 @@ async function downloadMappingPng() {
   await downloadSvgAsPng(svg, `${slugify(`segments-policies-map-${focus}`)}.png`, "mapping graph");
 }
 
+async function downloadSegmentReferencePng() {
+  const svg = document.querySelector(".segment-reference-svg");
+  if (!svg) return toast("No segment reference graph is available to download.");
+  const metric = state.segmentReferenceMetric || "live-hosts";
+  await downloadSvgAsPng(svg, `${slugify(`segment-policy-references-${metric}`)}.png`, "segment reference graph");
+}
+
 async function downloadSvgAsPng(svg, filename, label = "diagram") {
   const source = svgMarkupForExport(svg);
   const url = svgMarkupDataUrl(source);
@@ -3390,6 +3577,9 @@ function resetLocalWorkspaceState() {
     "hiddenPolicyNonConflictRanges",
     "hiddenMappingSegmentLinks",
     "visualizationLens",
+    "segmentReferenceMetric",
+    "segmentReferenceFilter",
+    "segmentReferenceLimit",
     "hostIpSource",
     "vizFilter:mapping",
     "vizFilter:ranges",
@@ -3411,6 +3601,9 @@ function resetLocalWorkspaceState() {
   state.hiddenPolicyNonConflictRanges = {};
   state.hiddenMappingSegmentLinks = {};
   state.visualizationLens = "mapping";
+  state.segmentReferenceMetric = "live_hosts";
+  state.segmentReferenceFilter = "all";
+  state.segmentReferenceLimit = 7;
   state.visualizationFilters = { mapping: "", ranges: "", segments: "", ips: "", policies: "" };
 }
 
@@ -4046,6 +4239,63 @@ function countIps(range = "") {
   const last = ipToNumber(end);
   if (!Number.isFinite(first) || !Number.isFinite(last) || last < first) return 0;
   return last - first + 1;
+}
+
+function clampNumber(value, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return min;
+  return Math.min(max, Math.max(min, Math.round(number)));
+}
+
+function sumIpCapacity(ranges = []) {
+  return (ranges || []).reduce((total, range) => total + countIps(range), 0);
+}
+
+function compactNumber(value) {
+  const number = Number(value || 0);
+  if (Math.abs(number) < 10000) return formatNumber(number);
+  return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(number);
+}
+
+function segmentReferenceMetricLabel(metric) {
+  if (metric === "configured_policies") return "Configured policies";
+  if (metric === "ip_count") return "IPs in ranges";
+  return "Live hosts";
+}
+
+function wrapSvgText(value, maxChars = 22, maxLines = 2) {
+  const text = String(value || "").trim();
+  if (!text) return [""];
+  const words = text.split(/\s+/);
+  const lines = [];
+  let current = "";
+  words.forEach((word) => {
+    const next = current ? `${current} ${word}` : word;
+    if (next.length <= maxChars || !current) {
+      current = next;
+    } else {
+      lines.push(current);
+      current = word;
+    }
+  });
+  if (current) lines.push(current);
+  const visible = lines.slice(0, maxLines);
+  if (lines.length > maxLines && visible.length) {
+    visible[visible.length - 1] = truncateText(visible[visible.length - 1], Math.max(4, maxChars - 1));
+  }
+  return visible.length ? visible : [truncateText(text, maxChars)];
+}
+
+function svgTextLines(lines, x, y, options = {}) {
+  const fontSize = Number(options.fontSize || 13);
+  const lineHeight = Number(options.lineHeight || fontSize + 4);
+  const weight = options.weight || 800;
+  const fill = options.fill || "#111827";
+  const anchor = options.anchor || "start";
+  const anchorAttr = anchor === "middle" ? ` text-anchor="middle"` : anchor === "end" ? ` text-anchor="end"` : "";
+  return (lines || [])
+    .map((line, index) => `<text x="${x}" y="${y + index * lineHeight}" font-size="${fontSize}" font-weight="${weight}" fill="${fill}"${anchorAttr}>${escapeSvg(line)}</text>`)
+    .join("");
 }
 
 function sameSegment(left = {}, right = {}) {

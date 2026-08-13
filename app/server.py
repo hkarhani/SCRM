@@ -580,10 +580,16 @@ def import_from_mcp(client: RemoteMcpClient, payload: McpCollectPayload) -> dict
                 "hosts_list_ips",
                 {"q": "", "limit": 0, "refresh": bool(payload.refresh), "field_filter": ""},
             )
-            rows = normalize_hosts(hosts_payload if isinstance(hosts_payload, dict) else {"hosts": hosts_payload})
-            snapshot = {"collected_at": utc_now(), "count": len(rows), "hosts": rows, "source": "remote_mcp"}
+            rows, host_meta = normalize_mcp_hosts(client, hosts_payload)
+            snapshot = {
+                "collected_at": utc_now(),
+                "count": len(rows),
+                "hosts": rows,
+                "source": "remote_mcp",
+                "meta": host_meta,
+            }
             HOSTS_PATH.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
-            imported.append({"artifact": "hosts", "hosts": len(rows)})
+            imported.append({"artifact": "hosts", "hosts": len(rows), **host_meta})
         except Exception as exc:
             record_skip("hosts", exc)
 
@@ -807,7 +813,7 @@ def build_analysis() -> dict[str, Any]:
     usage = build_policy_segment_usage(policies.get("policies") or [], xml_segments.get("segments") or [], live_segments)
     host_ips = [host["ip"] for host in host_snapshot.get("hosts") or [] if host.get("ip")]
     conflicts = detect_conflicts(live_segments, usage, host_ips)
-    mapping = build_segment_policy_mapping(live_segments, usage, conflicts, policies.get("policies") or [])
+    mapping = build_segment_policy_mapping(live_segments, usage, conflicts, policies.get("policies") or [], host_ips)
     zero_ranges = [
         {
             **usage.get(segment["key"], {}),
@@ -1696,7 +1702,14 @@ def build_segment_policy_mapping(
     usage: dict[str, dict[str, Any]],
     conflicts: dict[str, list[dict[str, Any]]],
     policies: list[dict[str, Any]],
+    host_ips: list[str] | None = None,
 ) -> dict[str, Any]:
+    host_ints = []
+    for ip in host_ips or []:
+        try:
+            host_ints.append(int(ipaddress.IPv4Address(ip)))
+        except Exception:
+            continue
     conflicting_ranges_by_segment: dict[str, set[str]] = {}
     conflict_categories_by_segment: dict[str, set[str]] = {}
     for stage_key, rows in conflicts.items():
@@ -1720,18 +1733,24 @@ def build_segment_policy_mapping(
         references = segment_usage.get("policy_references") or []
         conflict_ranges = sorted(conflicting_ranges_by_segment.get(segment_key, set()), key=lambda value: [_ip_sort_token(value), value])
         categories = sorted(conflict_categories_by_segment.get(segment_key, set()))
+        segment_ranges = segment.get("ranges") or []
+        range_intervals = [parsed for parsed in (parse_ip_range(value) for value in segment_ranges) if parsed]
+        ip_count = sum(max(0, int(parsed["end"]) - int(parsed["start"]) + 1) for parsed in range_intervals)
+        live_host_count = len({ip for ip in host_ints if any(int(parsed["start"]) <= ip <= int(parsed["end"]) for parsed in range_intervals)})
         row = {
             "key": segment_key,
             "name": segment.get("name", ""),
             "path": segment.get("path", ""),
             "depth": segment.get("depth", 0),
-            "ranges": segment.get("ranges") or [],
+            "ranges": segment_ranges,
             "child_count": segment.get("child_count", 0),
             "used": bool(segment_usage.get("used")),
             "direct_used": bool(segment_usage.get("direct_used")),
             "used_reason": segment_usage.get("used_reason", ""),
             "policy_reference_count": int(segment_usage.get("policy_reference_count") or 0),
             "policy_references": references,
+            "live_host_count": live_host_count,
+            "ip_count": ip_count,
             "has_conflicts": bool(conflict_ranges),
             "conflict_range_count": len(conflict_ranges),
             "conflicting_ranges": conflict_ranges,
@@ -1811,6 +1830,9 @@ def build_segment_policy_mapping(
             "clean_segments": sum(1 for segment in segment_rows if not segment.get("has_conflicts")),
             "policies_without_segments": sum(1 for policy in policy_rows if policy.get("mapping_state") == "no_segments"),
             "policies_linked_to_conflicting_segments": sum(1 for policy in policy_rows if policy.get("mapping_state") == "conflicting_segments"),
+            "live_segment_hosts": sum(int(segment.get("live_host_count") or 0) for segment in segment_rows),
+            "segment_ip_capacity": sum(int(segment.get("ip_count") or 0) for segment in segment_rows),
+            "segment_policy_references": sum(int(segment.get("policy_reference_count") or 0) for segment in segment_rows),
         },
     }
 
@@ -1963,7 +1985,7 @@ def find_admin_node(payload: dict[str, Any] | list[Any], segment_key: str, path:
 
 
 def normalize_hosts(payload: dict[str, Any]) -> list[dict[str, str]]:
-    rows = first_list(payload, "hosts", "Hosts", "Host")
+    rows = first_list(payload, "hosts", "Hosts", "Host", "endpoints", "Endpoints")
     if not rows and isinstance(payload.get("_embedded"), dict):
         for value in payload["_embedded"].values():
             if isinstance(value, list):
@@ -1986,8 +2008,53 @@ def normalize_hosts(payload: dict[str, Any]) -> list[dict[str, str]]:
         if ip in seen:
             continue
         seen.add(ip)
-        output.append({"ip": ip, "id": str(pick(row, "hostId", "id", "ID") or ""), "mac": str(pick(row, "mac", "MACAddress", "macAddress") or "")})
+        output.append({"ip": ip, "id": str(pick(row, "hostId", "host_id", "id", "ID") or ""), "mac": str(pick(row, "mac", "MACAddress", "macAddress") or "")})
     return output
+
+
+def normalize_mcp_hosts(client: RemoteMcpClient, payload: Any) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    normalized_payload = payload if isinstance(payload, dict) else {"hosts": payload}
+    rows = normalize_hosts(normalized_payload)
+    meta = {
+        "mcp_endpoint_count": len(first_list(normalized_payload, "endpoints", "Endpoints")),
+        "mcp_total_matching": normalized_payload.get("total_matching") if isinstance(normalized_payload, dict) else None,
+        "property_enrichment_attempted": 0,
+        "property_enrichment_succeeded": 0,
+        "property_enrichment_failed": 0,
+    }
+    if rows:
+        return rows, meta
+    endpoints = first_list(normalized_payload, "endpoints", "Endpoints")
+    if not endpoints:
+        return rows, meta
+    enriched_rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for endpoint in endpoints:
+        if not isinstance(endpoint, dict):
+            continue
+        host_id = str(pick(endpoint, "host_id", "hostId", "id", "ID") or "").strip()
+        if not host_id:
+            continue
+        meta["property_enrichment_attempted"] += 1
+        try:
+            properties = client.call_tool("host_get_properties", {"host_id": host_id})
+        except Exception:
+            meta["property_enrichment_failed"] += 1
+            continue
+        ip = first_preferred_ipv4(properties, "otsm_details_cc_ip", "ip", "ipv4", "ipAddress", "IPAddress") or first_ipv4_value(properties)
+        if not ip or ip in seen:
+            continue
+        seen.add(ip)
+        identity = properties.get("identity", {}) if isinstance(properties, dict) else {}
+        enriched_rows.append(
+            {
+                "ip": ip,
+                "id": host_id,
+                "mac": str(pick(endpoint, "mac", "MACAddress", "macAddress") or pick(identity, "mac", "MACAddress", "macAddress") or ""),
+            }
+        )
+        meta["property_enrichment_succeeded"] += 1
+    return enriched_rows, meta
 
 
 def parse_host_ip_file(content: bytes) -> list[dict[str, str]]:
@@ -2186,6 +2253,26 @@ def first_ipv4_value(value: Any) -> str:
             return str(ipaddress.IPv4Address(value.strip()))
         except Exception:
             return ""
+    return ""
+
+
+def first_preferred_ipv4(value: Any, *keys: str) -> str:
+    if isinstance(value, dict):
+        for key in keys:
+            if key not in value:
+                continue
+            found = first_ipv4_value(value[key])
+            if found:
+                return found
+        for item in value.values():
+            found = first_preferred_ipv4(item, *keys)
+            if found:
+                return found
+    if isinstance(value, list):
+        for item in value:
+            found = first_preferred_ipv4(item, *keys)
+            if found:
+                return found
     return ""
 
 
