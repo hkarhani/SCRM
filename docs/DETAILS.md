@@ -116,6 +116,8 @@ The script prompts for the password securely at runtime.
 Alternatively, admins can upload an exported hosts CSV instead of running the
 collector script. If the CSV contains an `IPv4 Address` column, SCRM imports
 only that column as host IP evidence and ignores the other exported fields.
+If that column contains no valid IPv4 addresses, the upload is rejected and
+the previous host snapshot is preserved.
 This supports privacy-sensitive exports where all columns except the endpoint
 IPv4 address are removed before sharing.
 
@@ -130,6 +132,7 @@ Passwords are intentionally excluded from exported workspace bundles.
 ```bash
 python3 -m compileall app/server.py
 node --check app/static/app.js
+python3 -m unittest discover -s tests -v
 ```
 
 Rebuild after code changes:

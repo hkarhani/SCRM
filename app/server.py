@@ -2083,6 +2083,7 @@ def parse_host_ip_file(content: bytes) -> list[dict[str, str]]:
         seen.add(ip)
         rows.append({"ip": ip, "id": row_id, "mac": mac})
 
+    ipv4_column = ""
     try:
         from io import StringIO
 
@@ -2109,6 +2110,9 @@ def parse_host_ip_file(content: bytes) -> list[dict[str, str]]:
 
     if rows:
         return rows
+
+    if ipv4_column:
+        raise HTTPException(status_code=400, detail="No valid IPv4 host IPs were found in the IPv4 Address column.")
 
     for match in re.findall(r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)", text):
         add_ip(match)
